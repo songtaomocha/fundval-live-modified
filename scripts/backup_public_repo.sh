@@ -27,6 +27,8 @@ fi
 # 同步代码（先按路径排除已知敏感/运行态数据）
 rsync -a --delete \
   --exclude='.git' \
+  --exclude='node_modules' \
+  --exclude='frontend/node_modules' \
   --exclude='.env' \
   --exclude='.env*' \
   --exclude='backend/data/fund.db' \
@@ -50,7 +52,7 @@ find "$WORK_DIR" -type f \( \
 
 # B) 文本内容扫描（事件1：扫描命中）
 # 说明：仅处理文本文件；二进制文件自动跳过（grep -I）
-MATCH_FILES=$(grep -IRlE --exclude-dir=.git \
+MATCH_FILES=$(grep -IRlE --exclude-dir=.git --exclude-dir=node_modules \
   '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer[[:space:]]+[A-Za-z0-9._-]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,})' \
   "$WORK_DIR" || true)
 
