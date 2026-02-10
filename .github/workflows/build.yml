@@ -1,0 +1,292 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macOS
+          - os: windows-latest
+            platform: Windows
+          - os: ubuntu-latest
+            platform: Linux
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install uv (Unix)
+        if: runner.os != 'Windows'
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install uv (Windows)
+        if: runner.os == 'Windows'
+        run: irm https://astral.sh/uv/install.ps1 | iex
+        shell: powershell
+
+      - name: Install Python dependencies
+        run: |
+          uv pip install --system -r backend/requirements.txt
+          uv pip install --system pyinstaller
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build backend with PyInstaller
+        run: uv run pyinstaller backend.spec --clean
+
+      - name: Install Electron dependencies
+        run: npm ci
+
+      - name: Build Electron app (macOS arm64)
+        if: runner.os == 'macOS'
+        run: npm run dist -- --arm64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Electron app (macOS x64)
+        if: runner.os == 'macOS'
+        run: npm run dist -- --x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Electron app (Windows)
+        if: runner.os == 'Windows'
+        run: npm run dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Electron app (Linux)
+        if: runner.os == 'Linux'
+        run: npm run dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: release/*.dmg
+          if-no-files-found: error
+
+      - name: Upload artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: release/*.exe
+
+      - name: Upload artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: |
+            release/*.AppImage
+            release/*.deb
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: |
+            ## 安装包下载
+
+            ### macOS
+            - **Apple Silicon (M1/M2/M3)**: `FundVal-Live-*-arm64.dmg`
+            - **Intel**: `FundVal-Live-*-x64.dmg`
+
+            ### Windows
+            - **64位**: `FundVal-Live-Setup-*.exe`
+
+            ### Linux
+            - **AppImage**: `FundVal-Live-*.AppImage`
+            - **Debian/Ubuntu**: `fundval-live_*_amd64.deb`
+
+            ## 本次更新 (v1.2.5)
+
+            ### ✨ 新功能
+
+            - **算法估值功能**
+              - 当 API 无法获取实时估值时，自动使用算法估算
+              - 支持加权移动平均（近期数据权重更大）和简单移动平均两种算法
+              - 基于近 5 日历史数据预测，平均误差率约 1.2%
+              - 前端显示紫色"算法估值"标签，清晰区分数据来源
+
+            - **回测功能**
+              - 点击"准确率"按钮查看算法回测结果
+              - 显示平均误差率、方向准确率、中位数误差
+              - 显示误差分布（≤0.5%, ≤1.0%, ≤2.0%, >2.0%）
+              - 基于近 20 天历史数据回测验证
+              - 基金卡片和详情页面均支持
+
+            - **基金详情页面增强**
+              - 算法估值基金在详情页右上角显示估值方法
+              - 添加回测按钮，可查看算法准确率
+              - 统一卡片和详情页的交互体验
+
+            ### 🔧 技术改进
+
+            - **新增估值算法模块**
+              - 创建 `backend/app/services/estimate.py` 模块
+              - 实现加权移动平均算法（权重：0.4, 0.3, 0.2, 0.07, 0.03）
+              - 实现简单移动平均算法
+              - 提供回测接口 `/api/fund/{id}/backtest`
+
+            - **API 响应增强**
+              - 实时估值接口返回 `source`（数据来源）、`method`（算法方法）、`confidence`（置信度）
+              - 前端根据 `source` 字段自动显示对应标签
+              - 支持多数据源优先级：EastMoney API > 算法估值
+
+            ---
+
+            ## 历史更新 (v1.2.4)
+
+            ### ✨ 新功能
+
+            - **交易记录状态显示**
+              - 交易记录列表新增"状态"列，清晰显示待确认/已确认状态
+              - 待确认交易显示旋转图标和黄色背景高亮
+              - 已确认交易显示绿色勾选图标
+              - 用户可以清楚看到哪些交易还在等待净值公布
+
+            - **基金搜索体验优化**
+              - 新增持仓时支持基金名称搜索，不再只能输入代码
+              - 关注基金搜索改为下拉选择框，实时显示搜索结果
+              - 搜索结果按相关性排序（精确匹配 > 代码前缀 > 名称包含）
+              - 支持 300ms 防抖，避免频繁请求
+              - 搜索结果显示基金名称、代码、类型
+
+            ### 🐛 Bug 修复
+
+            - **修复 AI 分析 prompt 变量不匹配问题**
+              - 修复默认 prompt 模板变量结构与代码传递不一致的问题
+              - 统一使用扁平变量结构（fund_code, fund_name 等）
+              - 解决 "Input to ChatPromptTemplate is missing variables" 错误
+
+            ### 🔧 技术改进
+
+            - **数据库性能优化**
+              - 添加 SQLite 性能优化参数（synchronous=NORMAL, cache_size=64MB）
+              - 优化临时表使用内存存储（temp_store=MEMORY）
+              - 增加锁等待超时时间（busy_timeout=30s）
+              - 提升并发读写性能
+
+            - **搜索功能增强**
+              - 搜索结果数量从 20 增加到 30
+              - 优化搜索排序算法，精确匹配优先
+              - 前端搜索组件统一使用下拉选择模式
+
+            ---
+
+            ## 历史更新 (v1.2.3)
+
+            ### 🐛 Bug 修复
+
+            - **修复多用户模式下 AI 配置无法生效的问题**
+              - 多用户模式下 AI API Key 配置保存到 user_settings 表，但读取时错误地从 settings 表读取
+              - 修复后正确从 user_settings 表读取用户配置
+              - 确保每个用户可以使用独立的 AI 配置
+
+            - **修复单用户模式下设置保存失败的问题**
+              - settings 表主键为 (key, user_id)，但代码使用 ON CONFLICT(key) 导致约束不匹配
+              - 修复所有 INSERT 语句，显式指定 user_id = NULL 并使用正确的 ON CONFLICT 子句
+              - 解决 "ON CONFLICT clause does not match any PRIMARY KEY" 错误
+
+            - **修复分时数据采集不支持多用户的问题**
+              - 分时数据采集只读取单用户模式的关注列表，忽略多用户模式
+              - 修复后同时采集所有用户的持仓和关注列表
+              - 确保多用户模式下每个用户都能看到关注基金的分时图表
+
+            - **修复数据库查询缺少 user_id 过滤的问题**
+              - 多处 settings 表查询缺少 user_id IS NULL 条件
+              - 可能导致读取到错误的配置或多条记录
+              - 统一添加 user_id 过滤条件，确保数据隔离
+
+            ### 🔧 技术改进
+
+            - **改进前端依赖安装**
+              - start.sh 中使用 npm ci 替代条件判断的 npm install
+              - 确保依赖严格按照 package-lock.json 安装
+              - 避免构建时缺少依赖的问题
+
+            - **代码质量提升**
+              - 统一所有 settings/user_settings 表的读写逻辑
+              - 确保单用户和多用户模式的数据完全隔离
+              - 修复 7 个文件中的数据库操作问题
+
+
+            ---
+
+            
+            ## 使用说明
+
+            1. 下载对应平台的安装包
+            2. 双击安装
+            3. 启动应用即可使用
+
+            数据存储位置：
+            - 数据库：`~/.fundval-live/data/fund.db`
+            - 日志：`~/.fundval-live/logs/`
+
+            ## 注意事项
+
+            - **macOS**：
+              - 首次打开可能提示"无法验证开发者"，请在系统偏好设置 → 安全性与隐私中允许
+              - 如提示"应用已损坏"，在终端执行：
+                ```bash
+                sudo xattr -dr com.apple.quarantine "/Applications/FundVal Live.app"
+                ```
+            - **Windows**：可能提示 SmartScreen，点击"更多信息"→"仍要运行"
+            - **Linux**：AppImage 需要添加执行权限：`chmod +x FundVal-Live-*.AppImage`
+
+            ## 开源协议
+
+            本项目采用 AGPL-3.0 协议开源。如果你使用本项目代码提供网络服务，必须开源你的修改。
+            详见：https://github.com/Ye-Yu-Mo/FundVal-Live/blob/main/LICENSE
+          files: |
+            macos-build/*
+            windows-build/*
+            linux-build/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

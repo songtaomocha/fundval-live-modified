@@ -1,0 +1,253 @@
+import axios from 'axios';
+
+const API_BASE_URL = '/api';
+
+export const api = axios.create({
+  baseURL: API_BASE_URL,
+  withCredentials: true, // 携带认证 cookie
+  timeout: 8000,
+});
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const shouldRetry = (error) => {
+  const method = (error?.config?.method || 'get').toLowerCase();
+  if (!['get', 'head'].includes(method)) return false;
+
+  const status = error?.response?.status;
+  if (!status) return true; // network timeout / connection reset
+  return [429, 500, 502, 503, 504].includes(status);
+};
+let handling401 = false;
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const config = error?.config || {};
+    config.__retryCount = config.__retryCount || 0;
+
+    if (shouldRetry(error) && config.__retryCount < 2) {
+      config.__retryCount += 1;
+      const backoffMs = 300 * Math.pow(2, config.__retryCount - 1) + Math.floor(Math.random() * 120);
+      await sleep(backoffMs);
+      return api(config);
+    }
+
+    if (error?.response?.status === 401 && !handling401) {
+      handling401 = true;
+      try {
+        // 统一 401 处理：仅发事件，不强制刷新，避免重载风暴导致体感变慢
+        window.__fundvalLast401At = Date.now();
+        window.dispatchEvent(new CustomEvent('fundval-auth-401'));
+        console.warn('[AUTH] 401 detected, please re-login');
+      } catch (_) {
+        // ignore
+      } finally {
+        setTimeout(() => {
+          handling401 = false;
+        }, 3000);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+export const searchFunds = async (query) => {
+  try {
+    const response = await api.get('/search', { params: { q: query } });
+    return response.data;
+  } catch (error) {
+    console.error("Search failed", error);
+    return [];
+  }
+};
+
+export const getFundDetail = async (fundId) => {
+  try {
+    const response = await api.get(`/fund/${fundId}`);
+    return response.data;
+  } catch (error) {
+    console.error(`Get fund ${fundId} failed`, error);
+    throw error;
+  }
+};
+
+export const getFundHistory = async (fundId, limit = 30, accountId = null) => {
+    try {
+        const params = { limit };
+        if (accountId) {
+            params.account_id = accountId;
+        }
+        const response = await api.get(`/fund/${fundId}/history`, { params });
+        return response.data;
+    } catch (error) {
+        console.error("Get history failed", error);
+        return { history: [], transactions: [] };
+    }
+};
+
+export const getFundBacktest = async (fundId, days = 20) => {
+    const response = await api.get(`/fund/${fundId}/backtest`, { params: { days } });
+    return response.data;
+};
+
+export const subscribeFund = async (fundId, data) => {
+    return api.post(`/fund/${fundId}/subscribe`, data);
+};
+
+export const getFundCategories = async () => {
+    try {
+        const response = await api.get('/categories');
+        return response.data.categories || [];
+    } catch (error) {
+        console.error("Get categories failed", error);
+        return [];
+    }
+};
+
+// Account management
+export const getAccounts = async () => {
+    try {
+        const response = await api.get('/accounts');
+        return response.data.accounts || [];
+    } catch (error) {
+        console.error("Get accounts failed", error);
+        return [];
+    }
+};
+
+export const createAccount = async (data) => {
+    return api.post('/accounts', data);
+};
+
+export const updateAccount = async (accountId, data) => {
+    return api.put(`/accounts/${accountId}`, data);
+};
+
+export const deleteAccount = async (accountId) => {
+    return api.delete(`/accounts/${accountId}`);
+};
+
+// Position management
+export const getAccountPositions = async (accountId) => {
+    try {
+        // 如果 accountId 为 0，调用聚合端点
+        if (accountId === 0) {
+            const response = await api.get('/positions/aggregate');
+            return response.data;
+        }
+
+        const response = await api.get('/account/positions', { params: { account_id: accountId } });
+        return response.data;
+    } catch (error) {
+        console.error("Get positions failed", error);
+        throw error;
+    }
+};
+
+export const updatePosition = async (data, accountId) => {
+    return api.post('/account/positions', data, { params: { account_id: accountId } });
+};
+
+export const deletePosition = async (code, accountId) => {
+    return api.delete(`/account/positions/${code}`, { params: { account_id: accountId } });
+};
+
+export const addPositionTrade = async (code, data, accountId) => {
+    const response = await api.post(`/account/positions/${code}/add`, data, { params: { account_id: accountId } });
+    return response.data;
+};
+
+export const reducePositionTrade = async (code, data, accountId) => {
+    const response = await api.post(`/account/positions/${code}/reduce`, data, { params: { account_id: accountId } });
+    return response.data;
+};
+
+export const getTransactions = async (accountId, code = null, limit = 100) => {
+    const params = { account_id: accountId, limit };
+    if (code) params.code = code;
+    const response = await api.get('/account/transactions', { params });
+    return response.data.transactions || [];
+};
+
+export const updatePositionsNav = async (accountId) => {
+    return api.post('/account/positions/update-nav', null, { params: { account_id: accountId } });
+};
+
+// AI Prompts management
+export const getPrompts = async () => {
+    try {
+        const response = await api.get('/ai/prompts');
+        return response.data.prompts || [];
+    } catch (error) {
+        console.error("Get prompts failed", error);
+        return [];
+    }
+};
+
+export const createPrompt = async (data) => {
+    return api.post('/ai/prompts', data);
+};
+
+export const updatePrompt = async (id, data) => {
+    return api.put(`/ai/prompts/${id}`, data);
+};
+
+export const deletePrompt = async (id) => {
+    return api.delete(`/ai/prompts/${id}`);
+};
+
+// Data import/export
+export const exportData = async (modules) => {
+    try {
+        const modulesParam = modules.join(',');
+        const response = await api.get(`/data/export?modules=${modulesParam}`, {
+            responseType: 'blob'
+        });
+
+        // Create download link
+        const url = window.URL.createObjectURL(new Blob([response.data]));
+        const link = document.createElement('a');
+        link.href = url;
+
+        // Extract filename from Content-Disposition header or use default
+        const contentDisposition = response.headers['content-disposition'];
+        let filename = 'fundval_export.json';
+        if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+            if (filenameMatch) {
+                filename = filenameMatch[1];
+            }
+        }
+
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+
+        return { success: true };
+    } catch (error) {
+        console.error('Export failed', error);
+        throw error;
+    }
+};
+
+export const importData = async (data, modules, mode) => {
+    return api.post('/data/import', { data, modules, mode });
+};
+
+// User preferences (watchlist, current account, sort option)
+export const getPreferences = async () => {
+    try {
+        const response = await api.get('/preferences');
+        return response.data;
+    } catch (error) {
+        console.error('Get preferences failed', error);
+        // Let caller decide fallback (e.g., localStorage) instead of silently returning empty watchlist.
+        throw error;
+    }
+};
+
+export const updatePreferences = async (data) => {
+    return api.post('/preferences', data);
+};

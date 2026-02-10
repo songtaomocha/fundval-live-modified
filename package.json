@@ -1,0 +1,88 @@
+{
+  "name": "fundval-live",
+  "version": "1.2.5",
+  "description": "盘中基金实时估值与逻辑审计系统",
+  "main": "electron/main.js",
+  "author": "Jasmine",
+  "license": "AGPL-3.0",
+  "homepage": "https://github.com/Ye-Yu-Mo/FundVal-Live",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ye-Yu-Mo/FundVal-Live.git"
+  },
+  "scripts": {
+    "electron": "electron .",
+    "electron:dev": "electron . --dev",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "./build-backend.sh",
+    "build:electron": "electron-builder",
+    "build:all": "npm run build:frontend && npm run build:backend && npm run build:electron",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.fundval.live",
+    "productName": "FundVal Live",
+    "publish": null,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/fundval-backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "backend/data",
+        "to": "data",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "icon": "electron/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "electron/entitlements.mac.plist",
+      "entitlementsInherit": "electron/entitlements.mac.plist"
+    },
+    "win": {
+      "icon": "electron/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "linux": {
+      "icon": "electron/icon.png",
+      "target": ["AppImage", "deb"],
+      "category": "Finance",
+      "maintainer": "Jasmine",
+      "vendor": "FundVal",
+      "synopsis": "盘中基金实时估值与逻辑审计系统"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

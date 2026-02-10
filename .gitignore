@@ -1,0 +1,44 @@
+*.md
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+__pycache__
+*.pyc
+.venv
+.env
+.env*
+backend/data/fund.db
+backend/data/fund.db-shm
+backend/data/fund.db-wal
+backend/data/.auth_secret
+backend/data/.encryption_key
+*.pid
+# Electron build
+release/
+build/
+
+# PyInstaller
+*.spec.backup
+features.json
