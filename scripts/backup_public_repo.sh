@@ -48,14 +48,19 @@ find "$WORK_DIR" -type f \( \
   -name 'token.json' \
 \) -print -delete || true
 
-# B) 文本内容高置信命中 -> 立即脱敏
+# B) 文本内容扫描（事件1：扫描命中）
 # 说明：仅处理文本文件；二进制文件自动跳过（grep -I）
 MATCH_FILES=$(grep -IRlE --exclude-dir=.git \
   '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Bearer[[:space:]]+[A-Za-z0-9._-]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,})' \
   "$WORK_DIR" || true)
 
 if [ -n "$MATCH_FILES" ]; then
-  echo "[$(date '+%F %T')] sensitive content found, redacting..."
+  MATCH_COUNT=$(printf '%s\n' "$MATCH_FILES" | sed '/^$/d' | wc -l)
+  echo "[$(date '+%F %T')] scan matched potential sensitive patterns: ${MATCH_COUNT} file(s)"
+  printf '%s\n' "$MATCH_FILES" | sed '/^$/d' | sed 's#^#  matched: #' 
+
+  # 事件2：对命中文件执行清理（脱敏/删除）
+  echo "[$(date '+%F %T')] cleanup started for matched files..."
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     # 逐项脱敏（尽量保留文件结构，避免误删代码）
