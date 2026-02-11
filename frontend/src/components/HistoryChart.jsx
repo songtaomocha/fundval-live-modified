@@ -21,6 +21,24 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useElementSize(containerRef);
 
+  const getEvenlyDistributedTicks = (values, desiredCount) => {
+    const n = values.length;
+    if (n === 0) return [];
+    if (n === 1) return [values[0]];
+
+    const count = Math.max(2, Math.min(desiredCount, n));
+    const last = n - 1;
+    const indexes = [0];
+    for (let i = 1; i < count - 1; i++) {
+      let idx = Math.round((i * last) / (count - 1));
+      idx = Math.max(idx, indexes[indexes.length - 1] + 1);
+      idx = Math.min(idx, last - (count - 1 - i));
+      indexes.push(idx);
+    }
+    indexes.push(last);
+    return indexes.map((idx) => values[idx]);
+  };
+
   useEffect(() => {
     if (!fundId) return;
 
@@ -69,22 +87,14 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
   }, [data]);
 
   const xTicks = useMemo(() => {
-    const n = validData.length;
-    if (n <= 1) return [0];
+    const indices = validData.map((_, idx) => idx);
+    const n = indices.length;
+    if (n <= 1) return indices;
 
     const desired = isCompact
       ? 3
       : Math.max(4, Math.min(7, Math.floor((safeWidth || 320) / 90)));
-    const count = Math.min(desired, n);
-    if (count <= 2) return [0, n - 1];
-
-    const ticks = [0];
-    for (let i = 1; i < count - 1; i++) {
-      const idx = Math.round((i * (n - 1)) / (count - 1));
-      if (idx !== ticks[ticks.length - 1]) ticks.push(idx);
-    }
-    if (ticks[ticks.length - 1] !== n - 1) ticks.push(n - 1);
-    return ticks;
+    return getEvenlyDistributedTicks(indices, desired);
   }, [validData, safeWidth, isCompact]);
 
   const yDomain = useMemo(() => {

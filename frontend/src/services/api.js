@@ -8,6 +8,13 @@ export const api = axios.create({
   timeout: 15000,
 });
 
+export const normalizeFundId = (fundId) => {
+  const raw = String(fundId ?? '').trim();
+  if (!raw) return '';
+  if (/^\d+$/.test(raw) && raw.length < 6) return raw.padStart(6, '0');
+  return raw;
+};
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const shouldRetry = (error) => {
@@ -62,17 +69,21 @@ export const searchFunds = async (query) => {
 };
 
 export const getFundQuote = async (fundId) => {
+  const normalizedFundId = normalizeFundId(fundId);
+  if (!normalizedFundId) {
+    throw new Error('Invalid fundId');
+  }
   try {
-    const response = await api.get(`/fund/${fundId}/quote`);
+    const response = await api.get(`/fund/${encodeURIComponent(normalizedFundId)}/quote`);
     return response.data;
   } catch (error) {
-    console.error(`Get fund quote ${fundId} failed`, error);
+    console.error(`Get fund quote ${normalizedFundId} failed`, error);
     throw error;
   }
 };
 
 export const getFundQuotes = async (fundIds = []) => {
-  const ids = (fundIds || []).map(String).filter(Boolean);
+  const ids = [...new Set((fundIds || []).map(normalizeFundId).filter(Boolean))];
   if (ids.length === 0) return [];
   try {
     const response = await api.get('/fund/quotes', { params: { ids: ids.join(',') } });
@@ -84,23 +95,31 @@ export const getFundQuotes = async (fundIds = []) => {
 };
 
 export const getFundDetail = async (fundId) => {
+  const normalizedFundId = normalizeFundId(fundId);
+  if (!normalizedFundId) {
+    throw new Error('Invalid fundId');
+  }
   try {
     // 详情接口包含持仓/指标等重计算，单独放宽超时，避免移动端频繁超时看不到明细
-    const response = await api.get(`/fund/${fundId}`, { timeout: 25000 });
+    const response = await api.get(`/fund/${encodeURIComponent(normalizedFundId)}`, { timeout: 25000 });
     return response.data;
   } catch (error) {
-    console.error(`Get fund ${fundId} failed`, error);
+    console.error(`Get fund ${normalizedFundId} failed`, error);
     throw error;
   }
 };
 
 export const getFundHistory = async (fundId, limit = 30, accountId = null) => {
+    const normalizedFundId = normalizeFundId(fundId);
+    if (!normalizedFundId) {
+        return { history: [], transactions: [] };
+    }
     try {
         const params = { limit };
         if (accountId) {
             params.account_id = accountId;
         }
-        const response = await api.get(`/fund/${fundId}/history`, { params, timeout: 25000 });
+        const response = await api.get(`/fund/${encodeURIComponent(normalizedFundId)}/history`, { params, timeout: 25000 });
         return response.data;
     } catch (error) {
         console.error("Get history failed", error);
@@ -109,12 +128,20 @@ export const getFundHistory = async (fundId, limit = 30, accountId = null) => {
 };
 
 export const getFundBacktest = async (fundId, days = 20) => {
-    const response = await api.get(`/fund/${fundId}/backtest`, { params: { days } });
+    const normalizedFundId = normalizeFundId(fundId);
+    if (!normalizedFundId) {
+        throw new Error('Invalid fundId');
+    }
+    const response = await api.get(`/fund/${encodeURIComponent(normalizedFundId)}/backtest`, { params: { days } });
     return response.data;
 };
 
 export const subscribeFund = async (fundId, data) => {
-    return api.post(`/fund/${fundId}/subscribe`, data);
+    const normalizedFundId = normalizeFundId(fundId);
+    if (!normalizedFundId) {
+        throw new Error('Invalid fundId');
+    }
+    return api.post(`/fund/${encodeURIComponent(normalizedFundId)}/subscribe`, data);
 };
 
 export const getFundCategories = async () => {

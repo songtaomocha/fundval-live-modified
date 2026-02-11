@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
-import { api } from '../services/api';
+import { api, normalizeFundId } from '../services/api';
 import { useElementSize } from '../hooks/useElementSize';
 
 export const IntradayChart = ({ fundId }) => {
@@ -11,14 +11,35 @@ export const IntradayChart = ({ fundId }) => {
   const [displayMode, setDisplayMode] = useState('nav'); // 'nav' | 'rate'
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useElementSize(containerRef);
+  const normalizedFundId = useMemo(() => normalizeFundId(fundId), [fundId]);
+
+  const getEvenlyDistributedTicks = useCallback((values, desiredCount) => {
+    const n = values.length;
+    if (n === 0) return [];
+    if (n === 1) return [values[0]];
+
+    const count = Math.max(2, Math.min(desiredCount, n));
+    const last = n - 1;
+    const indexes = [0];
+    for (let i = 1; i < count - 1; i++) {
+      let idx = Math.round((i * last) / (count - 1));
+      idx = Math.max(idx, indexes[indexes.length - 1] + 1);
+      idx = Math.min(idx, last - (count - 1 - i));
+      indexes.push(idx);
+    }
+    indexes.push(last);
+    return indexes.map((idx) => values[idx]);
+  }, []);
 
   const fetchIntraday = useCallback(async (date = '') => {
+    if (!normalizedFundId) return;
     setLoading(true);
     setError(null);
     try {
+      const encodedFundId = encodeURIComponent(normalizedFundId);
       const url = date
-        ? `/fund/${fundId}/intraday?date=${date}`
-        : `/fund/${fundId}/intraday`;
+        ? `/fund/${encodedFundId}/intraday?date=${date}`
+        : `/fund/${encodedFundId}/intraday`;
       const response = await api.get(url);
       const json = response.data;
       setData(json);
@@ -29,16 +50,16 @@ export const IntradayChart = ({ fundId }) => {
     } finally {
       setLoading(false);
     }
-  }, [fundId]);
+  }, [normalizedFundId]);
 
   useEffect(() => {
-    if (!fundId) return;
+    if (!normalizedFundId) return;
     fetchIntraday(selectedDate);
-  }, [fundId, selectedDate, fetchIntraday]);
+  }, [normalizedFundId, selectedDate, fetchIntraday]);
 
   // 今日分时自动刷新：页面保持打开时，每30秒刷新一次（仅今日）
   useEffect(() => {
-    if (!fundId) return;
+    if (!normalizedFundId) return;
     if (selectedDate) return;
 
     const timer = setInterval(() => {
@@ -48,7 +69,7 @@ export const IntradayChart = ({ fundId }) => {
     }, 30000);
 
     return () => clearInterval(timer);
-  }, [fundId, selectedDate, fetchIntraday]);
+  }, [normalizedFundId, selectedDate, fetchIntraday]);
 
   const safeWidth = containerWidth > 0
     ? containerWidth
@@ -104,20 +125,10 @@ export const IntradayChart = ({ fundId }) => {
     if (n <= 1) return times;
 
     const desired = isCompact
-      ? Math.max(4, Math.min(5, Math.floor((safeWidth || 320) / 110)))
-      : Math.max(5, Math.min(8, Math.floor((safeWidth || 320) / 85)));
-    const count = Math.min(desired, n);
-    if (count <= 2) return [times[0], times[n - 1]];
-
-    const ticks = [times[0]];
-    for (let i = 1; i < count - 1; i++) {
-      const idx = Math.round((i * (n - 1)) / (count - 1));
-      const value = times[idx];
-      if (value && value !== ticks[ticks.length - 1]) ticks.push(value);
-    }
-    if (ticks[ticks.length - 1] !== times[n - 1]) ticks.push(times[n - 1]);
-    return ticks;
-  }, [chartData, safeWidth, isCompact]);
+      ? Math.max(4, Math.min(6, Math.floor((safeWidth || 320) / 96)))
+      : Math.max(5, Math.min(9, Math.floor((safeWidth || 320) / 80)));
+    return getEvenlyDistributedTicks(times, desired);
+  }, [chartData, safeWidth, isCompact, getEvenlyDistributedTicks]);
 
   const yDomain = useMemo(() => {
     const key = displayMode === 'nav' ? 'estimate' : 'estRate';
@@ -127,12 +138,18 @@ export const IntradayChart = ({ fundId }) => {
     const min = Math.min(...values);
     const max = Math.max(...values);
     const span = max - min;
-    const navBaseline = Number.isFinite(Number(prevNav)) ? Number(prevNav) : ((min + max) / 2);
-    const pad = displayMode === 'nav'
-      // 净值模式按基准净值自适应最小边距，避免低波动时被固定 floor 压成“直线”
-      ? Math.max(span * 0.18, Math.max(navBaseline * 0.00008, 0.0001))
-      : Math.max(span * 0.15, 0.02);
-    return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
+    if (displayMode === 'nav') {
+      const navBaseline = Number.isFinite(Number(prevNav)) ? Number(prevNav) : ((min + max) / 2 || 1);
+      const minSpan = Math.max(Math.abs(navBaseline) * 0.00018, 0.00008);
+      const effectiveSpan = Math.max(span, minSpan);
+      const pad = effectiveSpan * 0.22;
+      return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
+    }
+
+    const minSpan = 0.06;
+    const effectiveSpan = Math.max(span, minSpan);
+    const pad = effectiveSpan * 0.18;
+    return [Number((min - pad).toFixed(4)), Number((max + pad).toFixed(4))];
   }, [chartData, displayMode, prevNav]);
 
   if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
@@ -227,6 +244,7 @@ export const IntradayChart = ({ fundId }) => {
             />
             <YAxis
               domain={yDomain}
+              tickCount={6}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}

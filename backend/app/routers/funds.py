@@ -21,6 +21,13 @@ _FUND_DETAIL_LOCK = threading.Lock()
 _FUND_DETAIL_CACHE_TTL = 60   # seconds（详情缓存加长，减少重复重算）
 _FUND_DETAIL_STALE_TTL = 1800  # seconds（上游抖动时优先回旧值，提升可用性）
 
+
+def _normalize_fund_id(fund_id: str) -> str:
+    value = str(fund_id or "").strip()
+    if value.isdigit() and len(value) < 6:
+        value = value.zfill(6)
+    return value
+
 @router.get("/categories")
 def get_fund_categories():
     """
@@ -108,6 +115,7 @@ def _get_quote_payload(fund_id: str):
 @router.get("/fund/{fund_id}/quote")
 def fund_quote(fund_id: str):
     """轻量报价接口：仅返回卡片展示必要字段，避免首屏调用重型详情计算。"""
+    fund_id = _normalize_fund_id(fund_id)
     now = time.time()
     try:
         return _get_quote_payload(fund_id)
@@ -160,6 +168,7 @@ def fund_quotes(ids: str = Query(..., description="基金代码列表，逗号�
 
 @router.get("/fund/{fund_id}")
 def fund_detail(fund_id: str):
+    fund_id = _normalize_fund_id(fund_id)
     now = time.time()
 
     # 1) Fast-path cache hit
@@ -217,6 +226,7 @@ def fund_history(
     多用户模式：如果提供 account_id，需要验证所有权
     """
     try:
+        fund_id = _normalize_fund_id(fund_id)
         history = get_fund_history(fund_id, limit=limit)
 
         # If account_id is provided, fetch transactions for this fund
@@ -266,6 +276,8 @@ def fund_intraday(fund_id: str, date: str = None):
     """
     from datetime import datetime
     from ..db import db_connection
+
+    fund_id = _normalize_fund_id(fund_id)
 
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -343,6 +355,7 @@ def fund_backtest(fund_id: str, days: int = 20):
     import statistics
 
     try:
+        fund_id = _normalize_fund_id(fund_id)
         # 获取历史数据（需要额外的数据用于训练）
         history = get_fund_history(fund_id, limit=days + 30)
 
@@ -445,6 +458,7 @@ def subscribe_fund(
         dict: 成功消息
     """
     user_id = get_user_id_for_query(current_user)
+    fund_id = _normalize_fund_id(fund_id)
     email = data.get("email")
     up = data.get("thresholdUp")
     down = data.get("thresholdDown")
