@@ -108,9 +108,13 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
     return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
   }, [validData]);
 
-  if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载走势中...</div>;
-  if (!data || data.length === 0) return <div className="h-64 flex items-center justify-center text-slate-400">暂无历史数据</div>;
-  if (validData.length === 0) return <div className="h-64 flex items-center justify-center text-slate-400">暂无有效数据</div>;
+  const statusMessage = loading
+    ? '加载走势中...'
+    : (!data || data.length === 0)
+      ? '暂无历史数据'
+      : validData.length === 0
+        ? '暂无有效数据'
+        : null;
 
   // Custom dot component for transaction markers
   const TransactionDot = (props) => {
@@ -202,10 +206,15 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
 
       <div
         ref={containerRef}
-        className="w-full min-w-0"
+        className="w-full min-w-0 relative"
         style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
       >
-        {containerWidth > 0 && containerHeight > 0 && (
+        {statusMessage && (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-400 z-10">
+            {statusMessage}
+          </div>
+        )}
+        {!statusMessage && containerWidth > 0 && containerHeight > 0 && (
           <AreaChart
             width={containerWidth}
             height={containerHeight}
@@ -232,12 +241,11 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
                 const value = String(validData[idx]?.date || '');
                 return isCompact ? value.slice(5, 10) : value.slice(0, 10);
               }}
-              minTickGap={20}
               interval={0}
               padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
               tickMargin={isCompact ? 7 : 12}
               angle={isCompact ? 0 : -45}
-              textAnchor="middle"
+              textAnchor={isCompact ? "middle" : "end"}
               height={xAxisHeight}
             />
             <YAxis

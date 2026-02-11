@@ -140,7 +140,7 @@ export const IntradayChart = ({ fundId }) => {
     const span = max - min;
     if (displayMode === 'nav') {
       const navBaseline = Number.isFinite(Number(prevNav)) ? Number(prevNav) : ((min + max) / 2 || 1);
-      const minSpan = Math.max(Math.abs(navBaseline) * 0.00018, 0.00008);
+      const minSpan = Math.max(Math.abs(navBaseline) * 0.004, 0.002);
       const effectiveSpan = Math.max(span, minSpan);
       const pad = effectiveSpan * 0.22;
       return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
@@ -152,33 +152,37 @@ export const IntradayChart = ({ fundId }) => {
     return [Number((min - pad).toFixed(4)), Number((max + pad).toFixed(4))];
   }, [chartData, displayMode, prevNav]);
 
-  if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
-  if (error) return <div className="h-64 flex items-center justify-center text-red-400">加载失败: {error}</div>;
-  if (!data || snapshots.length === 0) {
-    return <div className="h-64 flex items-center justify-center text-slate-400">暂无分时数据（仅在交易时间采集持仓和关注的基金）</div>;
-  }
+  const statusMessage = loading
+    ? '加载分时数据中...'
+    : error
+      ? `加载失败: ${error}`
+      : (!data || snapshots.length === 0)
+        ? '暂无分时数据（仅在交易时间采集持仓和关注的基金）'
+        : null;
+  const statusColor = error ? 'text-red-400' : 'text-slate-400';
 
-  const lastValidPoint = [...chartData].reverse().find(p => p.estimate !== null);
+  const lastValidPoint = statusMessage ? null : [...chartData].reverse().find(p => p.estimate !== null);
   const lastEstimate = lastValidPoint?.estimate || 0;
   const lastRate = lastValidPoint?.estRate || 0;
 
   const lineColor = displayMode === 'nav'
-    ? (!data.prevNav ? '#94a3b8' : lastEstimate >= data.prevNav ? '#ef4444' : '#22c55e')
+    ? (!data?.prevNav ? '#94a3b8' : lastEstimate >= data.prevNav ? '#ef4444' : '#22c55e')
     : (lastRate >= 0 ? '#ef4444' : '#22c55e');
 
   return (
     <div className="w-full">
-      {!data.prevNav && (
+      {!statusMessage && !data?.prevNav && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
           ⚠️ 缺少前日净值数据，无法计算涨跌幅百分比
         </div>
       )}
 
+      {!statusMessage && (
       <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
         <div className="text-sm text-slate-600 inline-flex flex-wrap items-center gap-3 min-h-[44px]">
-          <span className="leading-[44px]">日期: {data.date}</span>
-          {data.prevNav && <span className="leading-[44px]">前一日净值: {data.prevNav.toFixed(4)}</span>}
-          {data.lastCollectedAt && <span className="leading-[44px]">最后更新: {data.lastCollectedAt}</span>}
+          <span className="leading-[44px]">日期: {data?.date}</span>
+          {data?.prevNav && <span className="leading-[44px]">前一日净值: {data.prevNav.toFixed(4)}</span>}
+          {data?.lastCollectedAt && <span className="leading-[44px]">最后更新: {data.lastCollectedAt}</span>}
         </div>
         <div className="flex items-center gap-2 min-h-[44px]">
           <div className="flex gap-1 p-1 bg-slate-100 rounded-lg min-h-[44px] items-center">
@@ -203,7 +207,7 @@ export const IntradayChart = ({ fundId }) => {
               涨跌幅
             </button>
           </div>
-          {data.hasHistoricalIntraday && (
+          {data?.hasHistoricalIntraday && (
             <input
               type="date"
               value={selectedDate}
@@ -214,13 +218,19 @@ export const IntradayChart = ({ fundId }) => {
           )}
         </div>
       </div>
+      )}
 
       <div
         ref={containerRef}
-        className="w-full min-w-0"
+        className="w-full min-w-0 relative"
         style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
       >
-        {containerWidth > 0 && containerHeight > 0 && (
+        {statusMessage && (
+          <div className={`absolute inset-0 flex items-center justify-center ${statusColor} z-10`}>
+            {statusMessage}
+          </div>
+        )}
+        {!statusMessage && containerWidth > 0 && containerHeight > 0 && (
           <LineChart
             width={containerWidth}
             height={containerHeight}
@@ -234,11 +244,10 @@ export const IntradayChart = ({ fundId }) => {
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
-              minTickGap={16}
               interval={0}
               tickMargin={isCompact ? 7 : 12}
               angle={isCompact ? 0 : -45}
-              textAnchor="middle"
+              textAnchor={isCompact ? "middle" : "end"}
               height={xAxisHeight}
               padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
             />
