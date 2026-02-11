@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
 import { api } from '../services/api';
 
 export const IntradayChart = ({ fundId }) => {
@@ -8,9 +8,7 @@ export const IntradayChart = ({ fundId }) => {
   const [error, setError] = useState(null);
   const [selectedDate, setSelectedDate] = useState(''); // Empty = today
   const [displayMode, setDisplayMode] = useState('nav'); // 'nav' | 'rate'
-  const chartWrapRef = useRef(null);
-  const [chartWidth, setChartWidth] = useState(() => (typeof window !== 'undefined' ? Math.max(Math.min(window.innerWidth - 64, 1200), 320) : 320));
-  const [chartHeight, setChartHeight] = useState(300);
+  const [containerWidth, setContainerWidth] = useState(0);
 
   const fetchIntraday = useCallback(async (date = '') => {
     setLoading(true);
@@ -50,32 +48,29 @@ export const IntradayChart = ({ fundId }) => {
     return () => clearInterval(timer);
   }, [fundId, selectedDate, fetchIntraday]);
 
-  // 稳定计算图表尺寸，避免 Recharts 出现 width/height 为 -1 的告警
-  useEffect(() => {
-    const el = chartWrapRef.current;
-    if (!el) return;
+  const handleContainerResize = useCallback((widthOrSize) => {
+    const width = typeof widthOrSize === 'number'
+      ? widthOrSize
+      : Number(widthOrSize?.width || 0);
+    const next = Math.floor(width || 0);
+    setContainerWidth((prev) => (prev === next ? prev : next));
+  }, []);
 
-    const update = () => {
-      const rect = el.getBoundingClientRect();
-      const fallbackWidth = Math.max(Math.min(window.innerWidth - 64, 1200), 320);
-      const w = Math.floor(rect.width || 0);
-      const h = Math.floor(rect.height || 0);
-      setChartWidth(w > 0 ? w : fallbackWidth);
-      setChartHeight(h > 0 ? h : 300);
-    };
-
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener('orientationchange', update);
-    window.addEventListener('resize', update);
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('orientationchange', update);
-      window.removeEventListener('resize', update);
-    };
-  }, [fundId, selectedDate]);
+  const safeWidth = containerWidth > 0
+    ? containerWidth
+    : (typeof window !== 'undefined' ? window.innerWidth : 375);
+  const chartTier = safeWidth < 640 ? 'compact' : safeWidth < 1024 ? 'medium' : 'large';
+  const isCompact = chartTier === 'compact';
+  const chartHeight = chartTier === 'compact' ? 260 : chartTier === 'medium' ? 320 : 380;
+  const xAxisHeight = chartTier === 'compact' ? 40 : chartTier === 'medium' ? 46 : 52;
+  const chartMargin = chartTier === 'compact'
+    ? { top: 8, right: 12, left: 2, bottom: 2 }
+    : chartTier === 'medium'
+      ? { top: 12, right: 20, left: 6, bottom: 4 }
+      : { top: 14, right: 30, left: 10, bottom: 6 };
+  const yAxisWidth = displayMode === 'rate'
+    ? (chartTier === 'compact' ? 60 : chartTier === 'medium' ? 62 : 64)
+    : (chartTier === 'compact' ? 54 : chartTier === 'medium' ? 56 : 60);
 
   const snapshots = data?.snapshots || [];
 
@@ -114,7 +109,9 @@ export const IntradayChart = ({ fundId }) => {
     const n = times.length;
     if (n <= 1) return times;
 
-    const desired = Math.max(4, Math.min(8, Math.floor((chartWidth || 320) / 85)));
+    const desired = isCompact
+      ? Math.max(4, Math.min(5, Math.floor((safeWidth || 320) / 110)))
+      : Math.max(5, Math.min(8, Math.floor((safeWidth || 320) / 85)));
     const count = Math.min(desired, n);
     if (count <= 2) return [times[0], times[n - 1]];
 
@@ -126,7 +123,7 @@ export const IntradayChart = ({ fundId }) => {
     }
     if (ticks[ticks.length - 1] !== times[n - 1]) ticks.push(times[n - 1]);
     return ticks;
-  }, [chartData, chartWidth]);
+  }, [chartData, safeWidth, isCompact]);
 
   const yDomain = useMemo(() => {
     const key = displayMode === 'nav' ? 'estimate' : 'estRate';
@@ -205,15 +202,21 @@ export const IntradayChart = ({ fundId }) => {
         </div>
       </div>
 
-      <div ref={chartWrapRef} className="h-[320px] md:h-[400px] min-h-[320px] md:min-h-[400px] w-full min-w-0 overflow-hidden">
-        <LineChart
-          width={Math.max(chartWidth || 0, 320)}
-          height={Math.max(chartHeight || 0, 300)}
-          data={chartData}
-          margin={chartWidth < 768
-            ? { top: 10, right: 12, left: 4, bottom: 4 }
-            : { top: 14, right: 28, left: 10, bottom: 6 }}
+      <div
+        className="w-full min-w-0"
+        style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
+      >
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={1}
+          minHeight={chartHeight}
+          onResize={handleContainerResize}
         >
+          <LineChart
+            data={chartData}
+            margin={chartMargin}
+          >
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
             <XAxis
               dataKey="time"
@@ -223,18 +226,18 @@ export const IntradayChart = ({ fundId }) => {
               axisLine={false}
               minTickGap={16}
               interval={0}
-              tickMargin={chartWidth < 768 ? 10 : 14}
-              angle={-45}
+              tickMargin={isCompact ? 7 : 12}
+              angle={isCompact ? 0 : -45}
               textAnchor="middle"
-              height={chartWidth < 768 ? 48 : 52}
-              padding={chartWidth < 768 ? { left: 2, right: 8 } : { left: 10, right: 16 }}
+              height={xAxisHeight}
+              padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
             />
             <YAxis
               domain={yDomain}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
-              width={72}
+              width={yAxisWidth}
               tickFormatter={(value) => displayMode === 'rate' ? `${Number(value).toFixed(2)}%` : Number(value).toFixed(4)}
             />
             <Tooltip
@@ -272,6 +275,7 @@ export const IntradayChart = ({ fundId }) => {
               animationDuration={500}
             />
           </LineChart>
+        </ResponsiveContainer>
       </div>
 
       <div className="mt-2 text-xs text-slate-500 text-center">

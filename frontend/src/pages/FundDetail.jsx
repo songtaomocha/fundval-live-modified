@@ -171,7 +171,7 @@ export const FundDetail = ({ fund, onSubscribe, accountId, onNavigate, onEnsureD
             >今日分时</button>
           </div>
 
-          <div className="min-w-0">
+          <div className="-mx-2 sm:mx-0 min-w-0">
             {chartType === 'history' ? <HistoryChart fundId={fund.id} accountId={accountId} /> : <IntradayChart fundId={fund.id} />}
           </div>
         </div>

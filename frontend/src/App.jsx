@@ -860,7 +860,9 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
       </header>
 
       {/* 2. Main Content Area */}
-      <main className="max-w-7xl mx-auto px-3 sm:px-4 lg:px-6 py-3 sm:py-4">
+      <main className={`max-w-7xl mx-auto py-3 sm:py-4 ${
+        currentView === 'detail' ? 'px-2 sm:px-3 lg:px-4' : 'px-3 sm:px-4 lg:px-6'
+      }`}>
         <Suspense fallback={<div className="py-10 text-center text-slate-400">页面加载中...</div>}>
           {currentView === 'list' && (
             <FundList

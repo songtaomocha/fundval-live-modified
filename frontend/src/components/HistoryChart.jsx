@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useId, useRef, useMemo } from 'react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
+import React, { useEffect, useState, useId, useMemo, useCallback } from 'react';
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { getFundHistory } from '../services/api';
 
 const RANGES = [
@@ -17,9 +17,7 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState(22); // Default 1M
   const gradientId = useId().replace(/:/g, '_');
-  const chartWrapRef = useRef(null);
-  const [chartWidth, setChartWidth] = useState(() => (typeof window !== 'undefined' ? Math.max(Math.min(window.innerWidth - 64, 1200), 320) : 320));
-  const [chartHeight, setChartHeight] = useState(300);
+  const [containerWidth, setContainerWidth] = useState(0);
 
   useEffect(() => {
     if (!fundId) return;
@@ -46,31 +44,27 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
     fetchHistory();
   }, [fundId, range, accountId]);
 
-  useEffect(() => {
-    const el = chartWrapRef.current;
-    if (!el) return;
+  const handleContainerResize = useCallback((widthOrSize) => {
+    const width = typeof widthOrSize === 'number'
+      ? widthOrSize
+      : Number(widthOrSize?.width || 0);
+    const next = Math.floor(width || 0);
+    setContainerWidth((prev) => (prev === next ? prev : next));
+  }, []);
 
-    const update = () => {
-      const rect = el.getBoundingClientRect();
-      const fallbackWidth = Math.max(Math.min(window.innerWidth - 64, 1200), 320);
-      const w = Math.floor(rect.width || 0);
-      const h = Math.floor(rect.height || 0);
-      setChartWidth(w > 0 ? w : fallbackWidth);
-      setChartHeight(h > 0 ? h : 300);
-    };
-
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener('orientationchange', update);
-    window.addEventListener('resize', update);
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('orientationchange', update);
-      window.removeEventListener('resize', update);
-    };
-  }, [fundId, range]);
+  const safeWidth = containerWidth > 0
+    ? containerWidth
+    : (typeof window !== 'undefined' ? window.innerWidth : 375);
+  const chartTier = safeWidth < 640 ? 'compact' : safeWidth < 1024 ? 'medium' : 'large';
+  const isCompact = chartTier === 'compact';
+  const chartHeight = chartTier === 'compact' ? 260 : chartTier === 'medium' ? 320 : 380;
+  const xAxisHeight = chartTier === 'compact' ? 40 : chartTier === 'medium' ? 46 : 52;
+  const yAxisWidth = chartTier === 'compact' ? 54 : chartTier === 'medium' ? 56 : 60;
+  const chartMargin = chartTier === 'compact'
+    ? { top: 8, right: 12, left: 2, bottom: 2 }
+    : chartTier === 'medium'
+      ? { top: 12, right: 20, left: 6, bottom: 4 }
+      : { top: 14, right: 30, left: 10, bottom: 6 };
 
   // Ensure hooks order is stable across renders
   const validData = useMemo(
@@ -83,7 +77,9 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
     const n = dates.length;
     if (n <= 1) return dates;
 
-    const desired = Math.max(4, Math.min(7, Math.floor((chartWidth || 320) / 90)));
+    const desired = isCompact
+      ? 3
+      : Math.max(4, Math.min(7, Math.floor((safeWidth || 320) / 90)));
     const count = Math.min(desired, n);
     if (count <= 2) return [dates[0], dates[n - 1]];
 
@@ -95,7 +91,7 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
     }
     if (ticks[ticks.length - 1] !== dates[n - 1]) ticks.push(dates[n - 1]);
     return ticks;
-  }, [validData, chartWidth]);
+  }, [validData, safeWidth, isCompact]);
 
   const yDomain = useMemo(() => {
     const values = validData.map((d) => Number(d.nav)).filter((v) => Number.isFinite(v));
@@ -200,14 +196,20 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
         </div>
       )}
 
-      <div ref={chartWrapRef} className="h-[320px] md:h-[400px] w-full min-h-[320px] md:min-h-[400px] min-w-0 overflow-hidden">
+      <div
+        className="w-full min-w-0"
+        style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
+      >
+        <ResponsiveContainer
+          width="100%"
+          height="100%"
+          minWidth={1}
+          minHeight={chartHeight}
+          onResize={handleContainerResize}
+        >
           <AreaChart
-            width={Math.max(chartWidth || 0, 320)}
-            height={Math.max(chartHeight || 0, 300)}
             data={validData}
-            margin={chartWidth < 768
-              ? { top: 10, right: 12, left: 4, bottom: 4 }
-              : { top: 14, right: 28, left: 10, bottom: 6 }}
+            margin={chartMargin}
           >
             <defs>
               <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
@@ -222,21 +224,24 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
               tick={{fontSize: 10, fill: '#94a3b8'}}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(str) => String(str || '').slice(0, 10)}
+              tickFormatter={(str) => {
+                const value = String(str || '');
+                return isCompact ? value.slice(5, 10) : value.slice(0, 10);
+              }}
               minTickGap={20}
               interval={0}
-              padding={chartWidth < 768 ? { left: 2, right: 8 } : { left: 10, right: 16 }}
-              tickMargin={chartWidth < 768 ? 10 : 14}
-              angle={-45}
+              padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
+              tickMargin={isCompact ? 7 : 12}
+              angle={isCompact ? 0 : -45}
               textAnchor="middle"
-              height={chartWidth < 768 ? 48 : 52}
+              height={xAxisHeight}
             />
             <YAxis
               domain={yDomain}
               tick={{fontSize: 10, fill: '#94a3b8'}}
               tickLine={false}
               axisLine={false}
-              width={64}
+              width={yAxisWidth}
               tickFormatter={(value) => Number(value).toFixed(4)}
             />
             <Tooltip content={<CustomTooltip />} />
@@ -251,6 +256,7 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
               dot={<TransactionDot />}
             />
           </AreaChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
