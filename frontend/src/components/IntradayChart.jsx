@@ -130,22 +130,26 @@ export const IntradayChart = ({ fundId }) => {
     return getEvenlyDistributedTicks(times, desired);
   }, [chartData, safeWidth, isCompact, getEvenlyDistributedTicks]);
 
-  const yDomain = useMemo(() => {
+  const { yDomain, yTicks } = useMemo(() => {
     const key = displayMode === 'nav' ? 'estimate' : 'estRate';
     const values = chartData.map((d) => Number(d[key])).filter((v) => Number.isFinite(v));
-    if (values.length === 0) return ['auto', 'auto'];
+    if (values.length === 0) return { yDomain: ['auto', 'auto'], yTicks: undefined };
 
     const min = Math.min(...values);
     const max = Math.max(...values);
     const span = max - min;
-    if (displayMode === 'nav') {
-      // 只基于实际数据范围加 padding，不设 minSpan，让微小波动充分展开
-      const pad = span > 0 ? span * 0.15 : 0.0002;
-      return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
+    const pad = displayMode === 'nav'
+      ? (span > 0 ? span * 0.15 : 0.0002)
+      : (span > 0 ? span * 0.15 : 0.02);
+    const lo = min - pad;
+    const hi = max + pad;
+    const totalSpan = hi - lo;
+    const tickCount = 5;
+    const ticks = [];
+    for (let i = 0; i < tickCount; i++) {
+      ticks.push(lo + (totalSpan * i) / (tickCount - 1));
     }
-
-    const pad = span > 0 ? span * 0.15 : 0.02;
-    return [Number((min - pad).toFixed(4)), Number((max + pad).toFixed(4))];
+    return { yDomain: [lo, hi], yTicks: ticks };
   }, [chartData, displayMode, prevNav]);
 
   const statusMessage = loading
@@ -249,7 +253,8 @@ export const IntradayChart = ({ fundId }) => {
             />
             <YAxis
               domain={yDomain}
-              tickCount={6}
+              ticks={yTicks}
+              allowDataOverflow={true}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
