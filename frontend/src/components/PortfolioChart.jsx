@@ -1,6 +1,7 @@
-import React from 'react';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import React, { useRef } from 'react';
+import { PieChart, Pie, Cell, Tooltip, Legend } from 'recharts';
 import { RefreshCw } from 'lucide-react';
+import { useElementSize } from '../hooks/useElementSize';
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6'];
 const RADIAN = Math.PI / 180;
@@ -16,6 +17,8 @@ const renderCustomizedLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, per
 const getRateColor = (rate) => rate > 0 ? 'text-red-500' : rate < 0 ? 'text-green-500' : 'text-slate-500';
 
 export const PortfolioChart = ({ positions, summary, loading, onRefresh }) => {
+  const chartRef = useRef(null);
+  const { width: chartWidth, height: chartHeight } = useElementSize(chartRef);
   if (!positions || positions.length === 0) return null;
 
   const dataMap = {};
@@ -54,16 +57,16 @@ export const PortfolioChart = ({ positions, summary, loading, onRefresh }) => {
           <div className="flex flex-col gap-1 min-w-0"><div className="text-xs text-slate-500 font-medium uppercase tracking-wider">当日预估盈亏</div><div className={`text-lg sm:text-xl font-bold truncate ${getRateColor(summary?.total_day_income || 0)}`}>{(summary?.total_day_income || 0) > 0 ? '+' : ''}¥{(summary?.total_day_income || 0).toLocaleString()}</div></div>
         </div>
 
-        <div className="h-[260px] sm:h-[300px] w-full min-w-0 overflow-hidden">
-          <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={220}>
-            <PieChart>
+        <div ref={chartRef} className="h-[260px] sm:h-[300px] w-full min-w-0 overflow-hidden">
+          {chartWidth > 0 && chartHeight > 0 && (
+            <PieChart width={chartWidth} height={chartHeight}>
               <Pie data={data} cx="50%" cy="50%" labelLine={false} label={renderCustomizedLabel} outerRadius={80} dataKey="value" paddingAngle={2}>
                 {data.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
               </Pie>
               <Legend layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: '12px' }} />
               <Tooltip formatter={(value) => `¥${value.toLocaleString()}`} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
             </PieChart>
-          </ResponsiveContainer>
+          )}
         </div>
       </div>
     </div>

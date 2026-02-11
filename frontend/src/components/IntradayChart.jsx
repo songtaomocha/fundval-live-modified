@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
 import { api } from '../services/api';
+import { useElementSize } from '../hooks/useElementSize';
 
 export const IntradayChart = ({ fundId }) => {
   const [data, setData] = useState(null);
@@ -8,7 +9,8 @@ export const IntradayChart = ({ fundId }) => {
   const [error, setError] = useState(null);
   const [selectedDate, setSelectedDate] = useState(''); // Empty = today
   const [displayMode, setDisplayMode] = useState('nav'); // 'nav' | 'rate'
-  const [containerWidth, setContainerWidth] = useState(0);
+  const containerRef = useRef(null);
+  const { width: containerWidth, height: containerHeight } = useElementSize(containerRef);
 
   const fetchIntraday = useCallback(async (date = '') => {
     setLoading(true);
@@ -47,14 +49,6 @@ export const IntradayChart = ({ fundId }) => {
 
     return () => clearInterval(timer);
   }, [fundId, selectedDate, fetchIntraday]);
-
-  const handleContainerResize = useCallback((widthOrSize) => {
-    const width = typeof widthOrSize === 'number'
-      ? widthOrSize
-      : Number(widthOrSize?.width || 0);
-    const next = Math.floor(width || 0);
-    setContainerWidth((prev) => (prev === next ? prev : next));
-  }, []);
 
   const safeWidth = containerWidth > 0
     ? containerWidth
@@ -133,11 +127,13 @@ export const IntradayChart = ({ fundId }) => {
     const min = Math.min(...values);
     const max = Math.max(...values);
     const span = max - min;
+    const navBaseline = Number.isFinite(Number(prevNav)) ? Number(prevNav) : ((min + max) / 2);
     const pad = displayMode === 'nav'
-      ? Math.max(span * 0.12, 0.0008)
+      // 净值模式按基准净值自适应最小边距，避免低波动时被固定 floor 压成“直线”
+      ? Math.max(span * 0.18, Math.max(navBaseline * 0.00008, 0.0001))
       : Math.max(span * 0.15, 0.02);
     return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
-  }, [chartData, displayMode]);
+  }, [chartData, displayMode, prevNav]);
 
   if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
   if (error) return <div className="h-64 flex items-center justify-center text-red-400">加载失败: {error}</div>;
@@ -203,17 +199,14 @@ export const IntradayChart = ({ fundId }) => {
       </div>
 
       <div
+        ref={containerRef}
         className="w-full min-w-0"
         style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
       >
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={1}
-          minHeight={chartHeight}
-          onResize={handleContainerResize}
-        >
+        {containerWidth > 0 && containerHeight > 0 && (
           <LineChart
+            width={containerWidth}
+            height={containerHeight}
             data={chartData}
             margin={chartMargin}
           >
@@ -275,7 +268,7 @@ export const IntradayChart = ({ fundId }) => {
               animationDuration={500}
             />
           </LineChart>
-        </ResponsiveContainer>
+        )}
       </div>
 
       <div className="mt-2 text-xs text-slate-500 text-center">

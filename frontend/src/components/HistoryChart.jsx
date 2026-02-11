@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useId, useMemo, useCallback } from 'react';
-import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
+import React, { useEffect, useState, useId, useMemo, useRef } from 'react';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { getFundHistory } from '../services/api';
+import { useElementSize } from '../hooks/useElementSize';
 
 const RANGES = [
   { label: '近1周', val: 5 },
@@ -17,7 +18,8 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState(22); // Default 1M
   const gradientId = useId().replace(/:/g, '_');
-  const [containerWidth, setContainerWidth] = useState(0);
+  const containerRef = useRef(null);
+  const { width: containerWidth, height: containerHeight } = useElementSize(containerRef);
 
   useEffect(() => {
     if (!fundId) return;
@@ -44,14 +46,6 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
     fetchHistory();
   }, [fundId, range, accountId]);
 
-  const handleContainerResize = useCallback((widthOrSize) => {
-    const width = typeof widthOrSize === 'number'
-      ? widthOrSize
-      : Number(widthOrSize?.width || 0);
-    const next = Math.floor(width || 0);
-    setContainerWidth((prev) => (prev === next ? prev : next));
-  }, []);
-
   const safeWidth = containerWidth > 0
     ? containerWidth
     : (typeof window !== 'undefined' ? window.innerWidth : 375);
@@ -67,29 +61,29 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
       : { top: 14, right: 30, left: 10, bottom: 6 };
 
   // Ensure hooks order is stable across renders
-  const validData = useMemo(
-    () => (Array.isArray(data) ? data.filter(d => d && d.date && d.nav !== null && d.nav !== undefined) : []),
-    [data]
-  );
+  const validData = useMemo(() => {
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter((d) => d && d.date && d.nav !== null && d.nav !== undefined)
+      .map((d, idx) => ({ ...d, __xIndex: idx }));
+  }, [data]);
 
   const xTicks = useMemo(() => {
-    const dates = validData.map((d) => d.date);
-    const n = dates.length;
-    if (n <= 1) return dates;
+    const n = validData.length;
+    if (n <= 1) return [0];
 
     const desired = isCompact
       ? 3
       : Math.max(4, Math.min(7, Math.floor((safeWidth || 320) / 90)));
     const count = Math.min(desired, n);
-    if (count <= 2) return [dates[0], dates[n - 1]];
+    if (count <= 2) return [0, n - 1];
 
-    const ticks = [dates[0]];
+    const ticks = [0];
     for (let i = 1; i < count - 1; i++) {
       const idx = Math.round((i * (n - 1)) / (count - 1));
-      const value = dates[idx];
-      if (value && value !== ticks[ticks.length - 1]) ticks.push(value);
+      if (idx !== ticks[ticks.length - 1]) ticks.push(idx);
     }
-    if (ticks[ticks.length - 1] !== dates[n - 1]) ticks.push(dates[n - 1]);
+    if (ticks[ticks.length - 1] !== n - 1) ticks.push(n - 1);
     return ticks;
   }, [validData, safeWidth, isCompact]);
 
@@ -197,17 +191,14 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
       )}
 
       <div
+        ref={containerRef}
         className="w-full min-w-0"
         style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
       >
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={1}
-          minHeight={chartHeight}
-          onResize={handleContainerResize}
-        >
+        {containerWidth > 0 && containerHeight > 0 && (
           <AreaChart
+            width={containerWidth}
+            height={containerHeight}
             data={validData}
             margin={chartMargin}
           >
@@ -219,13 +210,16 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
             </defs>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
             <XAxis
-              dataKey="date"
+              dataKey="__xIndex"
+              type="number"
+              domain={[0, Math.max(validData.length - 1, 0)]}
               ticks={xTicks}
               tick={{fontSize: 10, fill: '#94a3b8'}}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(str) => {
-                const value = String(str || '');
+              tickFormatter={(tickValue) => {
+                const idx = Math.max(0, Math.min(validData.length - 1, Math.round(Number(tickValue) || 0)));
+                const value = String(validData[idx]?.date || '');
                 return isCompact ? value.slice(5, 10) : value.slice(0, 10);
               }}
               minTickGap={20}
@@ -256,7 +250,7 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
               dot={<TransactionDot />}
             />
           </AreaChart>
-        </ResponsiveContainer>
+        )}
       </div>
     </div>
   );
