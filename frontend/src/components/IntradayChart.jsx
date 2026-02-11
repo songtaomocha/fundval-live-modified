@@ -139,16 +139,12 @@ export const IntradayChart = ({ fundId }) => {
     const max = Math.max(...values);
     const span = max - min;
     if (displayMode === 'nav') {
-      const navBaseline = Number.isFinite(Number(prevNav)) ? Number(prevNav) : ((min + max) / 2 || 1);
-      const minSpan = Math.max(Math.abs(navBaseline) * 0.004, 0.002);
-      const effectiveSpan = Math.max(span, minSpan);
-      const pad = effectiveSpan * 0.22;
+      // 只基于实际数据范围加 padding，不设 minSpan，让微小波动充分展开
+      const pad = span > 0 ? span * 0.15 : 0.0002;
       return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
     }
 
-    const minSpan = 0.06;
-    const effectiveSpan = Math.max(span, minSpan);
-    const pad = effectiveSpan * 0.18;
+    const pad = span > 0 ? span * 0.15 : 0.02;
     return [Number((min - pad).toFixed(4)), Number((max + pad).toFixed(4))];
   }, [chartData, displayMode, prevNav]);
 
