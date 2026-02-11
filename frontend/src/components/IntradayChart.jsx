@@ -3,46 +3,41 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } 
 import { api, normalizeFundId } from '../services/api';
 import { useElementSize } from '../hooks/useElementSize';
 
+const toMinutes = (time) => {
+  const [h, m] = String(time || '').split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+  return h * 60 + m;
+};
+
+const isTradingMinute = (mins) => {
+  const morningOpen = 9 * 60;
+  const morningClose = 11 * 60 + 30;
+  const afternoonOpen = 13 * 60;
+  const afternoonClose = 15 * 60;
+  return (mins >= morningOpen && mins <= morningClose) || (mins >= afternoonOpen && mins <= afternoonClose);
+};
+
+// 压缩午休：13:00 之后整体左移 90 分钟，使 11:30 与 13:00 重合
+const compressTradingX = (mins) => (mins >= 13 * 60 ? mins - 90 : mins);
+
 export const IntradayChart = ({ fundId }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(''); // Empty = today
   const [displayMode, setDisplayMode] = useState('nav'); // 'nav' | 'rate'
+
   const containerRef = useRef(null);
   const { width: containerWidth, height: containerHeight } = useElementSize(containerRef);
   const normalizedFundId = useMemo(() => normalizeFundId(fundId), [fundId]);
 
-  const getEvenlyDistributedTicks = useCallback((values, desiredCount) => {
-    const n = values.length;
-    if (n === 0) return [];
-    if (n === 1) return [values[0]];
-
-    const count = Math.max(2, Math.min(desiredCount, n));
-    const last = n - 1;
-    const indexes = [0];
-    for (let i = 1; i < count - 1; i++) {
-      let idx = Math.round((i * last) / (count - 1));
-      idx = Math.max(idx, indexes[indexes.length - 1] + 1);
-      idx = Math.min(idx, last - (count - 1 - i));
-      indexes.push(idx);
-    }
-    indexes.push(last);
-    return indexes.map((idx) => values[idx]);
-  }, []);
-
-  const fetchIntraday = useCallback(async (date = '') => {
+  const fetchIntraday = useCallback(async () => {
     if (!normalizedFundId) return;
     setLoading(true);
     setError(null);
     try {
       const encodedFundId = encodeURIComponent(normalizedFundId);
-      const url = date
-        ? `/fund/${encodedFundId}/intraday?date=${date}`
-        : `/fund/${encodedFundId}/intraday`;
-      const response = await api.get(url);
-      const json = response.data;
-      setData(json);
+      const response = await api.get(`/fund/${encodedFundId}/intraday`);
+      setData(response.data);
     } catch (e) {
       console.error('Failed to load intraday data', e);
       setError(e.message || '加载失败');
@@ -54,22 +49,8 @@ export const IntradayChart = ({ fundId }) => {
 
   useEffect(() => {
     if (!normalizedFundId) return;
-    fetchIntraday(selectedDate);
-  }, [normalizedFundId, selectedDate, fetchIntraday]);
-
-  // 今日分时自动刷新：页面保持打开时，每30秒刷新一次（仅今日）
-  useEffect(() => {
-    if (!normalizedFundId) return;
-    if (selectedDate) return;
-
-    const timer = setInterval(() => {
-      if (!document.hidden) {
-        fetchIntraday('');
-      }
-    }, 30000);
-
-    return () => clearInterval(timer);
-  }, [normalizedFundId, selectedDate, fetchIntraday]);
+    fetchIntraday();
+  }, [normalizedFundId, fetchIntraday]);
 
   const safeWidth = containerWidth > 0
     ? containerWidth
@@ -77,118 +58,93 @@ export const IntradayChart = ({ fundId }) => {
   const chartTier = safeWidth < 640 ? 'compact' : safeWidth < 1024 ? 'medium' : 'large';
   const isCompact = chartTier === 'compact';
   const chartHeight = chartTier === 'compact' ? 260 : chartTier === 'medium' ? 320 : 380;
-  const xAxisHeight = chartTier === 'compact' ? 40 : chartTier === 'medium' ? 46 : 52;
+  const xAxisHeight = chartTier === 'compact' ? 52 : chartTier === 'medium' ? 46 : 52;
+  const yAxisWidth = chartTier === 'compact' ? 44 : chartTier === 'medium' ? 56 : 60;
   const chartMargin = chartTier === 'compact'
-    ? { top: 8, right: 12, left: 2, bottom: 2 }
+    ? { top: 6, right: 13, left: -1, bottom: 2 }
     : chartTier === 'medium'
       ? { top: 12, right: 20, left: 6, bottom: 4 }
       : { top: 14, right: 30, left: 10, bottom: 6 };
-  const yAxisWidth = displayMode === 'rate'
-    ? (chartTier === 'compact' ? 60 : chartTier === 'medium' ? 62 : 64)
-    : (chartTier === 'compact' ? 54 : chartTier === 'medium' ? 56 : 60);
 
-  const snapshots = data?.snapshots || [];
-
-  const timeline = [];
-  for (let hour = 9; hour <= 15; hour++) {
-    for (let minute = 0; minute < 60; minute += 5) {
-      if (hour === 15 && minute > 0) break;
-      timeline.push(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
-    }
+  if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
+  if (error) return <div className="h-64 flex items-center justify-center text-red-400">加载失败: {error}</div>;
+  if (!data || !data.snapshots || data.snapshots.length === 0) {
+    return <div className="h-64 flex items-center justify-center text-slate-400">暂无分时数据（仅在交易时间采集持仓和关注的基金）</div>;
   }
 
-  const snapshotMap = new Map(snapshots.map(s => [s.time, s.estimate]));
+  // 用原始 snapshots 直接画，不重采样；仅压缩午休时间轴
+  const chartData = data.snapshots
+    .map((s) => {
+      const mins = toMinutes(s.time);
+      const estimate = Number(s.estimate);
+      return {
+        time: s.time,
+        mins,
+        x: compressTradingX(mins),
+        estimate,
+        estRate: data.prevNav
+          ? parseFloat((((estimate - data.prevNav) / data.prevNav) * 100).toFixed(2))
+          : 0,
+      };
+    })
+    .filter((d) => Number.isFinite(d.mins) && isTradingMinute(d.mins) && Number.isFinite(d.estimate))
+    .sort((a, b) => a.mins - b.mins);
 
-  const toMinutes = (t) => {
-    const [h, m] = String(t).split(':').map(Number);
-    return h * 60 + m;
-  };
+  if (chartData.length === 0) {
+    return <div className="h-64 flex items-center justify-center text-slate-400">暂无有效分时点</div>;
+  }
 
-  const mergedTimes = Array.from(new Set([
-    ...timeline,
-    ...snapshots.map(s => s.time)
-  ])).sort((a, b) => toMinutes(a) - toMinutes(b));
+  const valueKey = displayMode === 'nav' ? 'estimate' : 'estRate';
+  const values = chartData.map((d) => d[valueKey]).filter((v) => Number.isFinite(v));
 
-  const prevNav = data?.prevNav;
-  const chartData = mergedTimes.map((time) => {
-    const estimate = snapshotMap.has(time) ? snapshotMap.get(time) : null;
-    const estRate = (estimate !== null && prevNav)
-      ? parseFloat(((estimate - prevNav) / prevNav * 100).toFixed(4))
-      : null;
+  const yDomain = values.length
+    ? (() => {
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = max - min;
+        const pad = span > 0 ? span * 0.12 : (displayMode === 'nav' ? 0.0003 : 0.03);
+        return [min - pad, max + pad];
+      })()
+    : ['auto', 'auto'];
 
-    return { time, estimate, estRate };
-  });
+  // 11:30 与 13:00 重合，仅显示 13:00
+  const xTicks = [
+    { v: 9 * 60, label: '09:00' },
+    { v: 10 * 60, label: '10:00' },
+    { v: 11 * 60, label: '11:00' },
+    { v: compressTradingX(13 * 60), label: '13:00' },
+    { v: compressTradingX(14 * 60), label: '14:00' },
+    { v: compressTradingX(15 * 60), label: '15:00' },
+  ];
+  const tickMap = new Map(xTicks.map((t) => [t.v, t.label]));
 
-  const xTicks = useMemo(() => {
-    const times = chartData.map((d) => d.time);
-    const n = times.length;
-    if (n <= 1) return times;
+  const xMin = 9 * 60;
+  const xMax = compressTradingX(15 * 60);
 
-    const desired = isCompact
-      ? Math.max(4, Math.min(6, Math.floor((safeWidth || 320) / 96)))
-      : Math.max(5, Math.min(9, Math.floor((safeWidth || 320) / 80)));
-    return getEvenlyDistributedTicks(times, desired);
-  }, [chartData, safeWidth, isCompact, getEvenlyDistributedTicks]);
-
-  const { yDomain, yTicks } = useMemo(() => {
-    const key = displayMode === 'nav' ? 'estimate' : 'estRate';
-    const values = chartData.map((d) => Number(d[key])).filter((v) => Number.isFinite(v));
-    if (values.length === 0) return { yDomain: ['auto', 'auto'], yTicks: undefined };
-
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const span = max - min;
-    const pad = displayMode === 'nav'
-      ? (span > 0 ? span * 0.15 : 0.0002)
-      : (span > 0 ? span * 0.15 : 0.02);
-    const lo = min - pad;
-    const hi = max + pad;
-    const totalSpan = hi - lo;
-    const tickCount = 5;
-    const ticks = [];
-    for (let i = 0; i < tickCount; i++) {
-      ticks.push(lo + (totalSpan * i) / (tickCount - 1));
-    }
-    return { yDomain: [lo, hi], yTicks: ticks };
-  }, [chartData, displayMode, prevNav]);
-
-  const statusMessage = loading
-    ? '加载分时数据中...'
-    : error
-      ? `加载失败: ${error}`
-      : (!data || snapshots.length === 0)
-        ? '暂无分时数据（仅在交易时间采集持仓和关注的基金）'
-        : null;
-  const statusColor = error ? 'text-red-400' : 'text-slate-400';
-
-  const lastValidPoint = statusMessage ? null : [...chartData].reverse().find(p => p.estimate !== null);
-  const lastEstimate = lastValidPoint?.estimate || 0;
-  const lastRate = lastValidPoint?.estRate || 0;
-
+  const lastPoint = chartData[chartData.length - 1];
   const lineColor = displayMode === 'nav'
-    ? (!data?.prevNav ? '#94a3b8' : lastEstimate >= data.prevNav ? '#ef4444' : '#22c55e')
-    : (lastRate >= 0 ? '#ef4444' : '#22c55e');
+    ? (!data.prevNav ? '#94a3b8' : lastPoint.estimate >= data.prevNav ? '#ef4444' : '#22c55e')
+    : (lastPoint.estRate >= 0 ? '#ef4444' : '#22c55e');
 
   return (
     <div className="w-full">
-      {!statusMessage && !data?.prevNav && (
+      {!data.prevNav && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
           ⚠️ 缺少前日净值数据，无法计算涨跌幅百分比
         </div>
       )}
 
-      {!statusMessage && (
       <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
-        <div className="text-sm text-slate-600 inline-flex flex-wrap items-center gap-3 min-h-[44px]">
-          <span className="leading-[44px]">日期: {data?.date}</span>
-          {data?.prevNav && <span className="leading-[44px]">前一日净值: {data.prevNav.toFixed(4)}</span>}
-          {data?.lastCollectedAt && <span className="leading-[44px]">最后更新: {data.lastCollectedAt}</span>}
+        <div className="text-sm text-slate-600">
+          <span>日期: {data.date}</span>
+          {data.prevNav && <span className="ml-4">前一日净值: {data.prevNav.toFixed(4)}</span>}
+          {data.lastCollectedAt && <span className="ml-4">最后更新: {data.lastCollectedAt}</span>}
         </div>
-        <div className="flex items-center gap-2 min-h-[44px]">
-          <div className="flex gap-1 p-1 bg-slate-100 rounded-lg min-h-[44px] items-center">
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1 p-1 bg-slate-100 rounded-lg">
             <button
               onClick={() => setDisplayMode('nav')}
-              className={`px-3 min-h-[40px] text-xs rounded-md transition-colors ${
+              className={`px-3 py-1 text-xs rounded-md transition-colors ${
                 displayMode === 'nav'
                   ? 'bg-white text-slate-700 font-medium shadow-sm'
                   : 'text-slate-500 hover:text-slate-700'
@@ -198,7 +154,7 @@ export const IntradayChart = ({ fundId }) => {
             </button>
             <button
               onClick={() => setDisplayMode('rate')}
-              className={`px-3 min-h-[40px] text-xs rounded-md transition-colors ${
+              className={`px-3 py-1 text-xs rounded-md transition-colors ${
                 displayMode === 'rate'
                   ? 'bg-white text-slate-700 font-medium shadow-sm'
                   : 'text-slate-500 hover:text-slate-700'
@@ -207,30 +163,15 @@ export const IntradayChart = ({ fundId }) => {
               涨跌幅
             </button>
           </div>
-          {data?.hasHistoricalIntraday && (
-            <input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              max={new Date().toISOString().split('T')[0]}
-              className="h-11 px-3 py-1 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          )}
         </div>
       </div>
-      )}
 
       <div
         ref={containerRef}
         className="w-full min-w-0 relative"
         style={{ height: `${chartHeight}px`, minHeight: `${chartHeight}px` }}
       >
-        {statusMessage && (
-          <div className={`absolute inset-0 flex items-center justify-center ${statusColor} z-10`}>
-            {statusMessage}
-          </div>
-        )}
-        {!statusMessage && containerWidth > 0 && containerHeight > 0 && (
+        {containerWidth > 0 && containerHeight > 0 && (
           <LineChart
             width={containerWidth}
             height={containerHeight}
@@ -239,29 +180,31 @@ export const IntradayChart = ({ fundId }) => {
           >
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
             <XAxis
-              dataKey="time"
-              ticks={xTicks}
+              type="number"
+              dataKey="x"
+              domain={[xMin, xMax]}
+              ticks={xTicks.map((t) => t.v)}
+              tickFormatter={(v) => tickMap.get(v) || ''}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
               interval={0}
-              tickMargin={isCompact ? 7 : 12}
-              angle={isCompact ? 0 : -45}
-              textAnchor={isCompact ? "middle" : "end"}
+              padding={isCompact ? { left: 9, right: 9 } : { left: 8, right: 16 }}
+              tickMargin={12}
+              angle={-45}
+              textAnchor="end"
               height={xAxisHeight}
-              padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
             />
             <YAxis
               domain={yDomain}
-              ticks={yTicks}
-              allowDataOverflow={true}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
               width={yAxisWidth}
-              tickFormatter={(value) => displayMode === 'rate' ? `${Number(value).toFixed(2)}%` : Number(value).toFixed(4)}
+              tickFormatter={(value) => (displayMode === 'rate' ? `${Number(value).toFixed(2)}%` : Number(value).toFixed(4))}
             />
             <Tooltip
+              labelFormatter={(_, payload) => payload?.[0]?.payload?.time || ''}
               contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
               itemStyle={{ color: '#1e293b', fontSize: '12px', fontWeight: 'bold' }}
               labelStyle={{ color: '#64748b', fontSize: '10px', marginBottom: '4px' }}
@@ -272,7 +215,7 @@ export const IntradayChart = ({ fundId }) => {
                     <span key="estimate">
                       {Number(value).toFixed(4)} <span style={{ color: '#64748b', fontSize: '10px' }}>({rate}%)</span>
                     </span>,
-                    '估值'
+                    '估值',
                   ];
                 }
                 if (displayMode === 'rate' && name === 'estRate') {
@@ -287,8 +230,8 @@ export const IntradayChart = ({ fundId }) => {
               <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
             ) : null}
             <Line
-              type="monotone"
-              dataKey={displayMode === 'nav' ? 'estimate' : 'estRate'}
+              type="linear"
+              dataKey={valueKey}
               stroke={lineColor}
               strokeWidth={2}
               dot={false}
@@ -300,7 +243,7 @@ export const IntradayChart = ({ fundId }) => {
       </div>
 
       <div className="mt-2 text-xs text-slate-500 text-center">
-        数据采集频率可在设置中配置 ·  仅在系统开启时运行（交易日 09:00-15:00）
+        数据采集仅在系统开启时运行（交易日 09:00-15:00）
       </div>
     </div>
   );

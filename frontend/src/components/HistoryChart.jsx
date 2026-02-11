@@ -70,10 +70,10 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
   const chartTier = safeWidth < 640 ? 'compact' : safeWidth < 1024 ? 'medium' : 'large';
   const isCompact = chartTier === 'compact';
   const chartHeight = chartTier === 'compact' ? 260 : chartTier === 'medium' ? 320 : 380;
-  const xAxisHeight = chartTier === 'compact' ? 40 : chartTier === 'medium' ? 46 : 52;
-  const yAxisWidth = chartTier === 'compact' ? 54 : chartTier === 'medium' ? 56 : 60;
+  const xAxisHeight = chartTier === 'compact' ? 52 : chartTier === 'medium' ? 46 : 52;
+  const yAxisWidth = chartTier === 'compact' ? 44 : chartTier === 'medium' ? 56 : 60;
   const chartMargin = chartTier === 'compact'
-    ? { top: 8, right: 12, left: 2, bottom: 2 }
+    ? { top: 6, right: 13, left: -1, bottom: 2 }
     : chartTier === 'medium'
       ? { top: 12, right: 20, left: 6, bottom: 4 }
       : { top: 14, right: 30, left: 10, bottom: 6 };
@@ -242,10 +242,10 @@ export const HistoryChart = ({ fundId, accountId = null }) => {
                 return isCompact ? value.slice(5, 10) : value.slice(0, 10);
               }}
               interval={0}
-              padding={isCompact ? { left: 2, right: 10 } : { left: 8, right: 16 }}
-              tickMargin={isCompact ? 7 : 12}
-              angle={isCompact ? 0 : -45}
-              textAnchor={isCompact ? "middle" : "end"}
+              padding={isCompact ? { left: 9, right: 9 } : { left: 8, right: 16 }}
+              tickMargin={12}
+              angle={-45}
+              textAnchor="end"
               height={xAxisHeight}
             />
             <YAxis

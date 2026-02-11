@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Plus, Edit2, Trash2, RefreshCw, ArrowUpDown, ChevronDown, Download, CheckCircle, Clock } from 'lucide-react';
 import { getRateColor } from '../components/StatCard';
 import { PortfolioChart } from '../components/PortfolioChart';
@@ -49,7 +49,7 @@ const Account = ({ currentAccount = 1, onSelectFund, onPositionChange, onSyncWat
   const handleSync = () => handleSyncWatchlist(positions);
   const handleSortChange = (option) => { setSortOption(option); setSortDropdownOpen(false); };
 
-  React.useEffect(() => {
+  useEffect(() => {
     const handleClickOutside = (event) => {
       if (sortDropdownRef.current && !sortDropdownRef.current.contains(event.target)) {
         setSortDropdownOpen(false);
@@ -58,6 +58,14 @@ const Account = ({ currentAccount = 1, onSelectFund, onPositionChange, onSyncWat
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!isActive) return;
+    const timer = setInterval(() => {
+      refetch();
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [isActive, refetch]);
 
   return (
     <div className="space-y-3 sm:space-y-4 min-w-0">
@@ -80,7 +88,7 @@ const Account = ({ currentAccount = 1, onSelectFund, onPositionChange, onSyncWat
 
       <div className="space-y-3">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <h2 className="text-lg sm:text-xl font-bold text-slate-800">{isAggregatedView ? '全部账户持仓汇总' : '持仓明细'}</h2>
+          <h2 className="text-xl sm:text-2xl font-bold text-slate-800">{isAggregatedView ? '全部账户持仓汇总' : '持仓明细'}</h2>
           <div className="grid grid-cols-2 sm:flex gap-2">
             <div className="relative" ref={sortDropdownRef}>
               <button onClick={() => setSortDropdownOpen(!sortDropdownOpen)} className="w-full sm:w-auto flex items-center justify-center gap-2 bg-white border border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-200 px-3 py-2 min-h-[44px] rounded-lg transition-colors text-sm font-medium">
@@ -104,7 +112,7 @@ const Account = ({ currentAccount = 1, onSelectFund, onPositionChange, onSyncWat
         </div>
       </div>
 
-      <div className="space-y-3 md:hidden">
+      <div className="space-y-3 md:hidden text-base">
         {sortedPositions.length === 0 ? <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 text-center text-slate-400">暂无持仓，快去记一笔吧</div> : sortedPositions.map((pos) => (
           <div key={pos.code} className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
             <button onClick={() => onSelectFund && onSelectFund(pos.code)} className="text-left w-full min-h-[44px]">
@@ -126,8 +134,8 @@ const Account = ({ currentAccount = 1, onSelectFund, onPositionChange, onSyncWat
       </div>
 
       <div className="hidden md:block bg-white rounded-xl shadow-sm border border-slate-200 overflow-x-auto">
-        <table className="w-full text-sm text-left border-collapse min-w-[760px] xl:min-w-[900px]">
-          <thead className="bg-slate-50 text-slate-500 font-medium text-xs uppercase tracking-wider sticky top-[73px] z-30 shadow-sm">
+        <table className="w-full text-sm lg:text-base text-left border-collapse min-w-[980px] xl:min-w-[1120px]">
+          <thead className="bg-slate-50 text-slate-600 font-semibold text-[13px] uppercase tracking-wider">
             <tr><th className="px-4 py-3 text-left">基金</th><th className="px-4 py-3 text-right">净值 | 估值</th><th className="px-4 py-3 text-right">份额 | 成本</th><th className="px-4 py-3 text-right hidden xl:table-cell">持有收益</th><th className="px-4 py-3 text-right hidden xl:table-cell">当日预估</th><th className="px-4 py-3 text-right">预估总值</th><th className="px-4 py-3 text-center">操作</th></tr>
           </thead>
           <tbody className="divide-y divide-slate-100">

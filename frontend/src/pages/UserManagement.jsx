@@ -150,7 +150,8 @@ export default function UserManagement() {
                   角色
                 </th>
                 <th className="w-1/5 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  登录状态
+                  <span className="sm:hidden">状态</span>
+                  <span className="hidden sm:inline">登录状态</span>
                 </th>
                 <th className="w-1/5 px-3 sm:px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                   操作
@@ -241,23 +242,32 @@ function UserRow({ user, currentUserId, onDelete }) {
         )}
       </td>
       <td className="px-3 sm:px-4 py-3 align-top">
-        {user.is_logged_in ? (
-          <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-green-100 text-green-700 rounded">
-            <Activity className="w-3.5 h-3.5" />
-            在线
-            {user.active_session_count > 1 ? ` (${user.active_session_count})` : ''}
-          </div>
-        ) : (
-          <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">
-            <Activity className="w-3.5 h-3.5" />
-            离线
-          </div>
-        )}
-        {user.last_active_at && (
-          <div className="text-[11px] text-gray-500 mt-1 truncate" title={user.last_active_at}>
-            最近活跃：{String(user.last_active_at).replace('T', ' ').slice(0, 19)}
-          </div>
-        )}
+        <div className="sm:hidden flex items-center h-8">
+          <span
+            className={`inline-block w-2.5 h-2.5 rounded-full ${user.is_logged_in ? 'bg-green-500' : 'bg-gray-400'}`}
+            title={user.is_logged_in ? '在线' : '离线'}
+          />
+        </div>
+
+        <div className="hidden sm:block">
+          {user.is_logged_in ? (
+            <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-green-100 text-green-700 rounded">
+              <Activity className="w-3.5 h-3.5" />
+              在线
+              {user.active_session_count > 1 ? ` (${user.active_session_count})` : ''}
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">
+              <Activity className="w-3.5 h-3.5" />
+              离线
+            </div>
+          )}
+          {user.last_active_at && (
+            <div className="text-[11px] text-gray-500 mt-1 truncate" title={user.last_active_at}>
+              最近活跃：{String(user.last_active_at).replace('T', ' ').slice(0, 19)}
+            </div>
+          )}
+        </div>
       </td>
       <td className="px-3 sm:px-4 py-3 align-top whitespace-nowrap text-right">
         <button
