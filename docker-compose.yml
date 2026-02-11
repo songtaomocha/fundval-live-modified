@@ -4,8 +4,9 @@ services:
     build: .
     image: fundval-live-local:latest
 
-    ports:
-      - "21345:21345"
+    # 走宿主机网络：容器内可直接访问 127.0.0.1:8045（同机 Antigravity）
+    # 不改 Antigravity 对外入口，仅优化本机内网链路延迟
+    network_mode: host
     volumes:
       - fundval-data:/app/backend/data
     environment:

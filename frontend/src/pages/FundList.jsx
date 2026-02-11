@@ -44,12 +44,12 @@ export const FundList = ({ watchlist, onSelectFund, onSubscribe, onRemove }) => 
         </div>
 
         <div className="flex flex-col sm:flex-row gap-2 sm:items-start">
-          <div className="flex bg-white border border-slate-200 rounded-lg p-1 overflow-x-auto no-scrollbar max-w-full">
+          <div className="flex h-11 bg-white border border-slate-200 rounded-lg p-1 overflow-x-auto no-scrollbar max-w-full">
             {categories.map(s => (
               <button
                 key={s}
                 onClick={() => setFilterSector(s)}
-                className={`px-3 py-2 min-h-[44px] text-xs rounded-md transition-colors whitespace-nowrap ${
+                className={`px-3 h-full text-xs rounded-md transition-colors whitespace-nowrap ${
                   filterSector === s
                     ? 'bg-blue-100 text-blue-700 font-medium'
                     : 'text-slate-500 hover:bg-slate-50'
@@ -62,7 +62,7 @@ export const FundList = ({ watchlist, onSelectFund, onSubscribe, onRemove }) => 
 
           <button
             onClick={() => setSortType(prev => prev === 'rate_desc' ? 'rate_asc' : 'rate_desc')}
-            className="flex items-center justify-center gap-1 bg-white border border-slate-200 text-slate-600 px-3 py-2 min-h-[44px] rounded-lg text-xs hover:bg-slate-50 transition-colors whitespace-nowrap"
+            className="flex h-11 items-center justify-center gap-1 bg-white border border-slate-200 text-slate-600 px-3 rounded-lg text-xs hover:bg-slate-50 transition-colors whitespace-nowrap"
           >
             <ArrowUpDown className="w-3 h-3" />
             {sortType === 'default' ? '排序' : sortType === 'rate_desc' ? '涨幅 ↓' : '涨幅 ↑'}

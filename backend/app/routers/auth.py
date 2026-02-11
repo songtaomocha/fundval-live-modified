@@ -81,6 +81,9 @@ class UserResponse(BaseModel):
     username: str
     is_admin: bool
     default_account_id: Optional[int] = None
+    is_logged_in: Optional[bool] = None
+    last_active_at: Optional[str] = None
+    active_session_count: Optional[int] = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -503,22 +506,57 @@ def list_users(admin: User = Depends(require_admin)):
         admin: 当前管理员（通过 require_admin 获取）
 
     Returns:
-        list[UserResponse]: 用户列表（包含默认账户 ID）
+        list[UserResponse]: 用户列表（包含默认账户 ID + 登录状态）
     """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
+
+        # 确保 session 表存在（兼容旧数据库）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                expiry TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
         cursor.execute(
             "SELECT id, username, is_admin, created_at FROM users ORDER BY id"
         )
         rows = cursor.fetchall()
+
+        # 统计每个用户当前有效会话数量 + 最近活跃时间
+        cursor.execute("""
+            SELECT
+                user_id,
+                COUNT(*) AS active_session_count,
+                MAX(datetime(updated_at, '+8 hours')) AS last_active_at
+            FROM user_sessions
+            WHERE datetime(replace(substr(expiry, 1, 19), 'T', ' ')) > datetime('now')
+            GROUP BY user_id
+        """)
+        session_rows = cursor.fetchall()
+        session_map = {
+            int(row[0]): {
+                "active_session_count": int(row[1] or 0),
+                "last_active_at": row[2]
+            }
+            for row in session_rows
+        }
 
         return [
             UserResponse(
                 id=row[0],
                 username=row[1],
                 is_admin=bool(row[2]),
-                default_account_id=get_user_default_account_id(row[0])
+                default_account_id=get_user_default_account_id(row[0]),
+                is_logged_in=(session_map.get(int(row[0]), {}).get("active_session_count", 0) > 0),
+                last_active_at=session_map.get(int(row[0]), {}).get("last_active_at"),
+                active_session_count=session_map.get(int(row[0]), {}).get("active_session_count", 0),
             )
             for row in rows
         ]

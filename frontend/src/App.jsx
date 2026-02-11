@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import {
   Search,
   ChevronLeft,
@@ -9,15 +9,16 @@ import {
   LogOut,
   UserCog
 } from 'lucide-react';
-import { FundList } from './pages/FundList';
-import { FundDetail } from './pages/FundDetail';
-import Account from './pages/Account';
-import Settings from './pages/Settings';
 import Login from './pages/Login';
-import UserManagement from './pages/UserManagement';
 import { SubscribeModal } from './components/SubscribeModal';
 import { AccountModal } from './components/AccountModal';
-import { searchFunds, getFundDetail, getAccountPositions, subscribeFund, getAccounts, getPreferences, updatePreferences } from './services/api';
+
+const FundList = lazy(() => import('./pages/FundList').then(m => ({ default: m.FundList })));
+const FundDetail = lazy(() => import('./pages/FundDetail').then(m => ({ default: m.FundDetail })));
+const Account = lazy(() => import('./pages/Account'));
+const Settings = lazy(() => import('./pages/Settings'));
+const UserManagement = lazy(() => import('./pages/UserManagement'));
+import { searchFunds, getFundQuote, getFundQuotes, getFundDetail, getAccountPositions, subscribeFund, getAccounts, getPreferences, updatePreferences } from './services/api';
 import { useAuth } from './contexts/AuthContext';
 import packageJson from '../../package.json';
 
@@ -74,8 +75,10 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
   const [searchLoading, setSearchLoading] = useState(false);
   const searchTimeoutRef = useRef(null);
   const watchlistRef = useRef([]);
+  const currentViewRef = useRef('list');
   const fundFetchCooldownRef = useRef({});
   const pollRunningRef = useRef(false);
+  const pendingHydrateRef = useRef(new Set());
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedFund, setSelectedFund] = useState(null);
@@ -138,14 +141,13 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
         });
         setWatchlist(deduped);
 
-        // Best-effort writeback merged result to backend (non-blocking for UX)
-        try {
-          await updatePreferences({ watchlist: JSON.stringify(deduped) });
-          dlog('loadPreferences writeback ok', { count: deduped.length });
-        } catch (e) {
-          console.warn('Best-effort watchlist writeback skipped', e);
-          dlog('loadPreferences writeback failed', { error: String(e) });
-        }
+        // Best-effort writeback merged result to backend（真正后台异步，不阻塞首屏）
+        updatePreferences({ watchlist: JSON.stringify(deduped) })
+          .then(() => dlog('loadPreferences writeback ok', { count: deduped.length }))
+          .catch((e) => {
+            console.warn('Best-effort watchlist writeback skipped', e);
+            dlog('loadPreferences writeback failed', { error: String(e) });
+          });
 
         // Set current account
         if (prefs.currentAccount && prefs.currentAccount !== 1) {
@@ -291,6 +293,40 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
     watchlistRef.current = watchlist;
   }, [watchlist]);
 
+  useEffect(() => {
+    currentViewRef.current = currentView;
+  }, [currentView]);
+
+  // 首屏/新增后立即补齐详情：不等 30s 轮询，优先提升可感知速度
+  useEffect(() => {
+    if (!watchlist || watchlist.length === 0) return;
+
+    const candidates = watchlist.filter(
+      (f) => f?.id && (f.trusted === false || (!f.estimate && (f.estRate || 0) === 0))
+    );
+    if (candidates.length === 0) return;
+
+    const queue = candidates
+      .filter(f => !pendingHydrateRef.current.has(f.id))
+      .slice(0, 6); // 限流，避免首屏瞬时打满
+
+    if (queue.length === 0) return;
+
+    queue.forEach(f => pendingHydrateRef.current.add(f.id));
+
+    (async () => {
+      try {
+        const quotes = await getFundQuotes(queue.map(f => f.id));
+        const quoteMap = new Map((quotes || []).map(q => [q.id, q]));
+        setWatchlist(prev => prev.map(f => quoteMap.has(f.id) ? { ...f, ...quoteMap.get(f.id), trusted: true } : f));
+      } catch (e) {
+        dlog('instant hydrate batch failed', { error: String(e) });
+      } finally {
+        queue.forEach(f => pendingHydrateRef.current.delete(f.id));
+      }
+    })();
+  }, [watchlist]);
+
   // Fetch account codes to prevent duplicates
   const fetchAccountCodes = async () => {
     try {
@@ -311,6 +347,8 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
   useEffect(() => {
     const tick = async () => {
       if (pollRunningRef.current) return;
+      // 详情页暂停列表轮询，避免与重详情请求抢资源导致“补拉很慢/失败”
+      if (currentViewRef.current === 'detail') return;
       pollRunningRef.current = true;
 
       const currentWatchlist = watchlistRef.current;
@@ -321,51 +359,33 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
 
       try {
         const now = Date.now();
-        const taskQueue = [...currentWatchlist];
-        const updatedList = [];
-        const maxConcurrent = 4;
+        const activeFunds = currentWatchlist.filter(f => now >= (fundFetchCooldownRef.current[f.id] || 0));
+        if (activeFunds.length > 0) {
+          const quotes = await getFundQuotes(activeFunds.map(f => f.id));
+          const updatedMap = new Map((quotes || []).map(q => [q.id, q]));
 
-        const worker = async () => {
-          while (taskQueue.length > 0) {
-            const fund = taskQueue.shift();
-            if (!fund) break;
+          setWatchlist(prev => {
+            const next = prev.map(f => updatedMap.has(f.id) ? { ...f, ...updatedMap.get(f.id) } : f);
+            dlog('poll merge(batch)', { prevCount: prev.length, nextCount: next.length, ids: next.map(f => f.id) });
+            return next;
+          });
 
-            const cooldownUntil = fundFetchCooldownRef.current[fund.id] || 0;
-            if (now < cooldownUntil) {
-              updatedList.push(fund); // skip temporarily when upstream is unstable
-              continue;
+          // batch 成功后清理冷却
+          activeFunds.forEach(f => {
+            if (fundFetchCooldownRef.current[f.id]) {
+              delete fundFetchCooldownRef.current[f.id];
             }
-
-            try {
-              const detail = await getFundDetail(fund.id);
-              // success: clear cooldown
-              if (fundFetchCooldownRef.current[fund.id]) {
-                delete fundFetchCooldownRef.current[fund.id];
-              }
-              updatedList.push({ ...fund, ...detail });
-            } catch (e) {
-              const status = e?.response?.status;
-              if (status === 502 || status === 503 || status === 504) {
-                // upstream/proxy unstable: cool down this code for 2 minutes to avoid hammering
-                fundFetchCooldownRef.current[fund.id] = Date.now() + 120000;
-                dlog('poll cooldown set', { id: fund.id, status, until: fundFetchCooldownRef.current[fund.id] });
-              }
-              updatedList.push(fund);
-            }
-          }
-        };
-
-        await Promise.all(Array.from({ length: Math.min(maxConcurrent, taskQueue.length || 1) }, () => worker()));
-
-        const updatedMap = new Map(updatedList.map(f => [f.id, f]));
-
-        // Merge onto latest state; do not resurrect deleted items or lose new additions
-        setWatchlist(prev => {
-          const next = prev.map(f => updatedMap.has(f.id) ? { ...f, ...updatedMap.get(f.id) } : f);
-          dlog('poll merge', { prevCount: prev.length, nextCount: next.length, ids: next.map(f => f.id) });
-          return next;
-        });
+          });
+        }
       } catch (e) {
+        const status = e?.response?.status;
+        if (status === 502 || status === 503 || status === 504) {
+          const until = Date.now() + 120000;
+          (currentWatchlist || []).forEach(f => {
+            fundFetchCooldownRef.current[f.id] = until;
+          });
+          dlog('poll batch cooldown set', { status, until });
+        }
         console.error("Polling error", e);
       } finally {
         pollRunningRef.current = false;
@@ -397,7 +417,7 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
     };
 
     document.addEventListener('visibilitychange', onVisible);
-    schedule(false);
+    schedule(true);
 
     return () => {
       stopped = true;
@@ -471,9 +491,9 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
 
     setLoading(true);
     try {
-      const detail = await getFundDetail(fund.id);
-      setWatchlist(prev => prev.map(f => f.id === fund.id ? { ...f, ...detail, trusted: true } : f));
-      dlog('add detail hydrated', { id: fund.id });
+      const quote = await getFundQuote(fund.id);
+      setWatchlist(prev => prev.map(f => f.id === fund.id ? { ...f, ...quote, trusted: true } : f));
+      dlog('add quote hydrated', { id: fund.id });
     } catch (e) {
       dlog('add detail hydrate failed', { id: fund.id, error: String(e) });
       // 不阻塞体验：保留占位，等待轮询补齐
@@ -520,34 +540,47 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
     setModalOpen(true);
   };
 
-  const handleCardClick = async (fundId) => {
-    // 检查基金是否在 watchlist 中
-    const existingFund = watchlist.find(f => f.id === fundId);
+  const ensureFundDetail = async (fundId, { silent = false } = {}) => {
+    const applyDetail = (detail) => {
+      setWatchlist(prev => {
+        const idx = prev.findIndex(f => f.id === fundId);
+        if (idx === -1) {
+          return [...prev, { ...detail, trusted: true }];
+        }
+        const next = [...prev];
+        next[idx] = { ...next[idx], ...detail, trusted: true };
+        return next;
+      });
+    };
 
-    if (!existingFund) {
-      // 如果不在 watchlist，先加载基金详情
+    try {
+      const detail = await getFundDetail(fundId);
+      applyDetail(detail);
+      return true;
+    } catch (e1) {
+      console.error('load detail failed(first)', e1);
+      // 快速二次重试一次，规避上游短抖动
       try {
-        const detail = await getFundDetail(fundId);
-        const newFund = { ...detail, trusted: true };
-        // 临时添加到 watchlist，添加前检查避免重复
-        setWatchlist(prev => {
-          // 再次检查是否已存在（防止竞态条件）
-          if (prev.find(f => f.id === newFund.id)) {
-            return prev; // 已存在，不添加
-          }
-          return [...prev, newFund];
-        });
-        setDetailFundId(fundId);
-      } catch (e) {
-        alert('无法加载基金详情');
-        return;
+        await new Promise(r => setTimeout(r, 600));
+        const detail2 = await getFundDetail(fundId);
+        applyDetail(detail2);
+        return true;
+      } catch (e2) {
+        console.error('load detail failed(retry)', e2);
+        if (!silent) alert('基金详情加载失败，请稍后重试');
+        return false;
       }
-    } else {
-      setDetailFundId(fundId);
     }
+  };
 
+  const handleCardClick = async (fundId) => {
+    // 先切到详情页，保证交互即时
+    setDetailFundId(fundId);
     setCurrentView('detail');
     window.scrollTo(0, 0);
+
+    // 再异步补齐重详情（持仓/指标/AI分析等）
+    await ensureFundDetail(fundId);
   };
 
   const handleBack = () => {
@@ -584,13 +617,13 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
           const addedFunds = await Promise.all(
               newFunds.map(async (pos) => {
                   try {
-                      const detail = await getFundDetail(pos.code);
+                      const quote = await getFundQuote(pos.code);
                       // 确保返回的数据有 id 字段
-                      if (!detail.id) {
-                          console.error(`Fund ${pos.code} has no id field`, detail);
+                      if (!quote.id) {
+                          console.error(`Fund ${pos.code} has no id field`, quote);
                           return null;
                       }
-                      return { ...detail, trusted: true };
+                      return { ...quote, trusted: true };
                   } catch (e) {
                       console.error(`Failed to sync ${pos.code}`, e);
                       return null;
@@ -714,11 +747,11 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
                 </div>
               )}
 
-              <div className="order-2 min-w-0 flex-1 ml-auto text-right">
-                <h1 className="text-base sm:text-lg font-bold text-slate-800 leading-tight break-words">
+              <div className="order-2 min-w-0 flex-1 ml-auto text-right sm:text-right">
+                <h1 className="text-sm sm:text-lg font-bold text-slate-800 leading-tight break-words">
                   {currentView === 'detail' ? '基金详情' : (currentView === 'account' ? '我的账户' : (currentView === 'settings' ? '设置' : 'FundVal Live'))}
                 </h1>
-                <p className="text-xs text-slate-400 truncate">
+                <p className="hidden sm:block text-xs text-slate-400 truncate">
                   {currentView === 'detail' ? '盘中实时估值分析' : '盘中估值参考工具'}
                 </p>
               </div>
@@ -828,48 +861,50 @@ function AppContent({ currentUser, isMultiUserMode, isAdmin, logout }) {
 
       {/* 2. Main Content Area */}
       <main className="max-w-7xl mx-auto px-3 sm:px-4 lg:px-6 py-3 sm:py-4">
-        
-        {currentView === 'list' && (
-          <FundList 
-            watchlist={watchlist}
-            setWatchlist={setWatchlist}
-            onSelectFund={handleCardClick}
-            onRemove={removeFund}
-            onSubscribe={openSubscribeModal}
-          />
-        )}
+        <Suspense fallback={<div className="py-10 text-center text-slate-400">页面加载中...</div>}>
+          {currentView === 'list' && (
+            <FundList
+              watchlist={watchlist}
+              setWatchlist={setWatchlist}
+              onSelectFund={handleCardClick}
+              onRemove={removeFund}
+              onSubscribe={openSubscribeModal}
+            />
+          )}
 
-        {currentView === 'account' && (
-           <Account
-                currentAccount={currentAccount}
-                isActive={currentView === 'account'}
-                onSelectFund={handleCardClick}
-                onPositionChange={notifyPositionChange}
-                onSyncWatchlist={handleSyncWatchlist}
-                syncLoading={syncLoading}
-           />
-        )}
+          {currentView === 'account' && (
+            <Account
+              currentAccount={currentAccount}
+              isActive={currentView === 'account'}
+              onSelectFund={handleCardClick}
+              onPositionChange={notifyPositionChange}
+              onSyncWatchlist={handleSyncWatchlist}
+              syncLoading={syncLoading}
+            />
+          )}
 
-        {currentView === 'settings' && (
-          <Settings />
-        )}
+          {currentView === 'settings' && (
+            <Settings />
+          )}
 
-        {currentView === 'users' && (
-          <UserManagement />
-        )}
+          {currentView === 'users' && (
+            <UserManagement />
+          )}
 
-        {currentView === 'detail' && (
-          <FundDetail
-            fund={currentDetailFund}
-            onSubscribe={openSubscribeModal}
-            accountId={currentAccount}
-            onNavigate={navigateFund}
-            hasPrev={currentDetailIndex > 0}
-            hasNext={currentDetailIndex < watchlist.length - 1}
-            currentIndex={currentDetailIndex + 1}
-            totalCount={watchlist.length}
-          />
-        )}
+          {currentView === 'detail' && (
+            <FundDetail
+              fund={currentDetailFund}
+              onSubscribe={openSubscribeModal}
+              accountId={currentAccount}
+              onNavigate={navigateFund}
+              onEnsureDetail={ensureFundDetail}
+              hasPrev={currentDetailIndex > 0}
+              hasNext={currentDetailIndex < watchlist.length - 1}
+              currentIndex={currentDetailIndex + 1}
+              totalCount={watchlist.length}
+            />
+          )}
+        </Suspense>
       </main>
 
       {/* 3. Subscription Modal (Global) */}

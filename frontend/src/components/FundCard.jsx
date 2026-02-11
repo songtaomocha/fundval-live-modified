@@ -74,8 +74,8 @@ export const FundCard = ({ fund, onClick, onRemove, onSubscribe }) => {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 items-end pointer-events-none min-w-0">
         <div className="col-span-1">
           <span className="text-xs text-slate-400 block mb-1">盘中估算</span>
-          <div className={`text-2xl sm:text-3xl font-bold tracking-tight ${getRateColor(fund.estRate)}`}>
-            {fund.estRate > 0 ? '+' : ''}{fund.estRate}%
+          <div className={`text-xl sm:text-2xl font-bold tracking-tight ${getRateColor(fund.estRate)}`}>
+            {Number(fund.estRate) > 0 ? '+' : ''}{Number(fund.estRate || 0).toFixed(4)}%
           </div>
         </div>
         <div className="col-span-1 sm:col-span-2 flex justify-between items-end sm:pl-4 sm:border-l border-slate-100 gap-2">

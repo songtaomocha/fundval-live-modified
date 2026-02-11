@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from 'recharts';
 import { api } from '../services/api';
 
@@ -9,8 +9,8 @@ export const IntradayChart = ({ fundId }) => {
   const [selectedDate, setSelectedDate] = useState(''); // Empty = today
   const [displayMode, setDisplayMode] = useState('nav'); // 'nav' | 'rate'
   const chartWrapRef = useRef(null);
-  const [chartWidth, setChartWidth] = useState(0);
-  const [chartHeight, setChartHeight] = useState(220);
+  const [chartWidth, setChartWidth] = useState(() => (typeof window !== 'undefined' ? Math.max(Math.min(window.innerWidth - 64, 1200), 320) : 320));
+  const [chartHeight, setChartHeight] = useState(300);
 
   const fetchIntraday = useCallback(async (date = '') => {
     setLoading(true);
@@ -21,15 +21,9 @@ export const IntradayChart = ({ fundId }) => {
         : `/fund/${fundId}/intraday`;
       const response = await api.get(url);
       const json = response.data;
-      console.log('Intraday data loaded:', {
-        date: json.date,
-        prevNav: json.prevNav,
-        snapshotsCount: json.snapshots?.length || 0,
-        lastCollectedAt: json.lastCollectedAt
-      });
       setData(json);
     } catch (e) {
-      console.error("Failed to load intraday data", e);
+      console.error('Failed to load intraday data', e);
       setError(e.message || '加载失败');
       setData(null);
     } finally {
@@ -40,34 +34,51 @@ export const IntradayChart = ({ fundId }) => {
   useEffect(() => {
     if (!fundId) return;
     fetchIntraday(selectedDate);
-  }, [fundId, selectedDate]);
+  }, [fundId, selectedDate, fetchIntraday]);
 
+  // 今日分时自动刷新：页面保持打开时，每30秒刷新一次（仅今日）
+  useEffect(() => {
+    if (!fundId) return;
+    if (selectedDate) return;
+
+    const timer = setInterval(() => {
+      if (!document.hidden) {
+        fetchIntraday('');
+      }
+    }, 30000);
+
+    return () => clearInterval(timer);
+  }, [fundId, selectedDate, fetchIntraday]);
+
+  // 稳定计算图表尺寸，避免 Recharts 出现 width/height 为 -1 的告警
   useEffect(() => {
     const el = chartWrapRef.current;
     if (!el) return;
 
     const update = () => {
       const rect = el.getBoundingClientRect();
+      const fallbackWidth = Math.max(Math.min(window.innerWidth - 64, 1200), 320);
       const w = Math.floor(rect.width || 0);
       const h = Math.floor(rect.height || 0);
-      setChartWidth(w > 0 ? w : 0);
-      setChartHeight(h > 0 ? h : 220);
+      setChartWidth(w > 0 ? w : fallbackWidth);
+      setChartHeight(h > 0 ? h : 300);
     };
 
     update();
-    const ro = new ResizeObserver(() => update());
+    const ro = new ResizeObserver(update);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    window.addEventListener('orientationchange', update);
+    window.addEventListener('resize', update);
 
-  if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
-  if (error) return <div className="h-64 flex items-center justify-center text-red-400">加载失败: {error}</div>;
-  if (!data || !data.snapshots || data.snapshots.length === 0) {
-    return <div className="h-64 flex items-center justify-center text-slate-400">暂无分时数据（仅在交易时间采集持仓和关注的基金）</div>;
-  }
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('orientationchange', update);
+      window.removeEventListener('resize', update);
+    };
+  }, [fundId, selectedDate]);
 
-  // Build base timeline (09:00-15:00, every 5 minutes), and merge with actual snapshot times
-  // so non-5-min points (e.g. 13:22) are also rendered.
+  const snapshots = data?.snapshots || [];
+
   const timeline = [];
   for (let hour = 9; hour <= 15; hour++) {
     for (let minute = 0; minute < 60; minute += 5) {
@@ -76,7 +87,7 @@ export const IntradayChart = ({ fundId }) => {
     }
   }
 
-  const snapshotMap = new Map((data.snapshots || []).map(s => [s.time, s.estimate]));
+  const snapshotMap = new Map(snapshots.map(s => [s.time, s.estimate]));
 
   const toMinutes = (t) => {
     const [h, m] = String(t).split(':').map(Number);
@@ -85,26 +96,57 @@ export const IntradayChart = ({ fundId }) => {
 
   const mergedTimes = Array.from(new Set([
     ...timeline,
-    ...(data.snapshots || []).map(s => s.time)
+    ...snapshots.map(s => s.time)
   ])).sort((a, b) => toMinutes(a) - toMinutes(b));
 
+  const prevNav = data?.prevNav;
   const chartData = mergedTimes.map((time) => {
     const estimate = snapshotMap.has(time) ? snapshotMap.get(time) : null;
-    const estRate = (estimate !== null && data.prevNav)
-      ? parseFloat(((estimate - data.prevNav) / data.prevNav * 100).toFixed(2))
+    const estRate = (estimate !== null && prevNav)
+      ? parseFloat(((estimate - prevNav) / prevNav * 100).toFixed(4))
       : null;
 
     return { time, estimate, estRate };
   });
 
-  console.log('IntradayChart debug:', {
-    displayMode,
-    hasPrevNav: !!data.prevNav,
-    prevNav: data.prevNav,
-    snapshotsCount: data.snapshots.length,
-    firstEstRate: chartData[0]?.estRate,
-    lastEstRate: chartData[chartData.length - 1]?.estRate
-  });
+  const xTicks = useMemo(() => {
+    const times = chartData.map((d) => d.time);
+    const n = times.length;
+    if (n <= 1) return times;
+
+    const desired = Math.max(4, Math.min(8, Math.floor((chartWidth || 320) / 85)));
+    const count = Math.min(desired, n);
+    if (count <= 2) return [times[0], times[n - 1]];
+
+    const ticks = [times[0]];
+    for (let i = 1; i < count - 1; i++) {
+      const idx = Math.round((i * (n - 1)) / (count - 1));
+      const value = times[idx];
+      if (value && value !== ticks[ticks.length - 1]) ticks.push(value);
+    }
+    if (ticks[ticks.length - 1] !== times[n - 1]) ticks.push(times[n - 1]);
+    return ticks;
+  }, [chartData, chartWidth]);
+
+  const yDomain = useMemo(() => {
+    const key = displayMode === 'nav' ? 'estimate' : 'estRate';
+    const values = chartData.map((d) => Number(d[key])).filter((v) => Number.isFinite(v));
+    if (values.length === 0) return ['auto', 'auto'];
+
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min;
+    const pad = displayMode === 'nav'
+      ? Math.max(span * 0.12, 0.0008)
+      : Math.max(span * 0.15, 0.02);
+    return [Number((min - pad).toFixed(6)), Number((max + pad).toFixed(6))];
+  }, [chartData, displayMode]);
+
+  if (loading) return <div className="h-64 flex items-center justify-center text-slate-400">加载分时数据中...</div>;
+  if (error) return <div className="h-64 flex items-center justify-center text-red-400">加载失败: {error}</div>;
+  if (!data || snapshots.length === 0) {
+    return <div className="h-64 flex items-center justify-center text-slate-400">暂无分时数据（仅在交易时间采集持仓和关注的基金）</div>;
+  }
 
   const lastValidPoint = [...chartData].reverse().find(p => p.estimate !== null);
   const lastEstimate = lastValidPoint?.estimate || 0;
@@ -116,7 +158,6 @@ export const IntradayChart = ({ fundId }) => {
 
   return (
     <div className="w-full">
-      {/* Warning if no prevNav */}
       {!data.prevNav && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
           ⚠️ 缺少前日净值数据，无法计算涨跌幅百分比
@@ -164,30 +205,37 @@ export const IntradayChart = ({ fundId }) => {
         </div>
       </div>
 
-      <div ref={chartWrapRef} className="h-[220px] md:h-[280px] min-h-[220px] md:min-h-[280px] w-full min-w-0 overflow-hidden">
-        {chartWidth > 0 ? (
-          <LineChart
-            width={chartWidth}
-            height={chartHeight}
-            data={chartData}
-            margin={{ top: 10, right: 40, left: 0, bottom: 0 }}
-          >
+      <div ref={chartWrapRef} className="h-[320px] md:h-[400px] min-h-[320px] md:min-h-[400px] w-full min-w-0 overflow-hidden">
+        <LineChart
+          width={Math.max(chartWidth || 0, 320)}
+          height={Math.max(chartHeight || 0, 300)}
+          data={chartData}
+          margin={chartWidth < 768
+            ? { top: 10, right: 12, left: 4, bottom: 4 }
+            : { top: 14, right: 28, left: 10, bottom: 6 }}
+        >
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
             <XAxis
               dataKey="time"
+              ticks={xTicks}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
-              ticks={chartData.map(d => d.time).filter(t => t.endsWith(':00') || t.endsWith(':30') || t === '15:00')}
-              minTickGap={20}
+              minTickGap={16}
+              interval={0}
+              tickMargin={chartWidth < 768 ? 10 : 14}
+              angle={-45}
+              textAnchor="middle"
+              height={chartWidth < 768 ? 48 : 52}
+              padding={chartWidth < 768 ? { left: 2, right: 8 } : { left: 10, right: 16 }}
             />
             <YAxis
-              domain={['auto', 'auto']}
+              domain={yDomain}
               tick={{ fontSize: 10, fill: '#94a3b8' }}
               tickLine={false}
               axisLine={false}
-              width={50}
-              tickFormatter={(value) => displayMode === 'rate' ? `${value}%` : value}
+              width={72}
+              tickFormatter={(value) => displayMode === 'rate' ? `${Number(value).toFixed(2)}%` : Number(value).toFixed(4)}
             />
             <Tooltip
               contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
@@ -195,32 +243,24 @@ export const IntradayChart = ({ fundId }) => {
               labelStyle={{ color: '#64748b', fontSize: '10px', marginBottom: '4px' }}
               formatter={(value, name, props) => {
                 if (displayMode === 'nav' && name === 'estimate') {
-                  const rate = props.payload.estRate;
+                  const rate = Number(props.payload.estRate || 0).toFixed(2);
                   return [
                     <span key="estimate">
-                      {value} <span style={{ color: '#64748b', fontSize: '10px' }}>({rate}%)</span>
+                      {Number(value).toFixed(4)} <span style={{ color: '#64748b', fontSize: '10px' }}>({rate}%)</span>
                     </span>,
                     '估值'
                   ];
                 }
                 if (displayMode === 'rate' && name === 'estRate') {
-                  return [`${value}%`, '涨跌幅'];
+                  return [`${Number(value).toFixed(2)}%`, '涨跌幅'];
                 }
                 return [value, name];
               }}
             />
             {displayMode === 'nav' && data.prevNav ? (
-              <ReferenceLine
-                y={data.prevNav}
-                stroke="#94a3b8"
-                strokeDasharray="3 3"
-              />
+              <ReferenceLine y={data.prevNav} stroke="#94a3b8" strokeDasharray="3 3" />
             ) : displayMode === 'rate' ? (
-              <ReferenceLine
-                y={0}
-                stroke="#94a3b8"
-                strokeDasharray="3 3"
-              />
+              <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="3 3" />
             ) : null}
             <Line
               type="monotone"
@@ -232,9 +272,6 @@ export const IntradayChart = ({ fundId }) => {
               animationDuration={500}
             />
           </LineChart>
-        ) : (
-          <div className="h-[220px] md:h-[280px] min-h-[220px] md:min-h-[280px] flex items-center justify-center text-slate-400">图表布局计算中...</div>
-        )}
       </div>
 
       <div className="mt-2 text-xs text-slate-500 text-center">

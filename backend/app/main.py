@@ -208,7 +208,7 @@ if os.path.exists(frontend_dir):
     async def serve_frontend():
         index_path = os.path.join(frontend_dir, "index.html")
         if os.path.exists(index_path):
-            return FileResponse(index_path)
+            return FileResponse(index_path, headers={"Cache-Control": "no-store, max-age=0"})
         return {"error": "Frontend not found"}
 
     @app.get("/{full_path:path}")
@@ -220,12 +220,13 @@ if os.path.exists(frontend_dir):
         # 尝试返回文件
         file_path = os.path.join(frontend_dir, full_path)
         if os.path.isfile(file_path):
-            return FileResponse(file_path)
+            # 对静态资源也禁缓存，避免用户端长期命中旧包导致前端异常
+            return FileResponse(file_path, headers={"Cache-Control": "no-store, max-age=0"})
 
         # 否则返回 index.html（SPA 路由）
         index_path = os.path.join(frontend_dir, "index.html")
         if os.path.exists(index_path):
-            return FileResponse(index_path)
+            return FileResponse(index_path, headers={"Cache-Control": "no-store, max-age=0"})
         return {"error": "Frontend not found"}
 else:
     print(f"Warning: Frontend directory not found at {frontend_dir}")

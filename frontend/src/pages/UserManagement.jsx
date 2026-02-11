@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Plus, Trash2, AlertCircle, Shield, User as UserIcon } from 'lucide-react';
+import { Users, Plus, Trash2, AlertCircle, Shield, User as UserIcon, Activity } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { getUsers, createUser, deleteUser, getAllowRegistration, setAllowRegistration } from '../api/admin';
 
@@ -143,13 +143,16 @@ export default function UserManagement() {
           <table className="w-full table-fixed">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="w-1/2 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-2/5 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   用户
                 </th>
-                <th className="w-1/4 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-1/5 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   角色
                 </th>
-                <th className="w-1/4 px-3 sm:px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="w-1/5 px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  登录状态
+                </th>
+                <th className="w-1/5 px-3 sm:px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                   操作
                 </th>
               </tr>
@@ -235,6 +238,25 @@ function UserRow({ user, currentUserId, onDelete }) {
           <span className="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-700 rounded">
             普通用户
           </span>
+        )}
+      </td>
+      <td className="px-3 sm:px-4 py-3 align-top">
+        {user.is_logged_in ? (
+          <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-green-100 text-green-700 rounded">
+            <Activity className="w-3.5 h-3.5" />
+            在线
+            {user.active_session_count > 1 ? ` (${user.active_session_count})` : ''}
+          </div>
+        ) : (
+          <div className="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium bg-gray-100 text-gray-600 rounded">
+            <Activity className="w-3.5 h-3.5" />
+            离线
+          </div>
+        )}
+        {user.last_active_at && (
+          <div className="text-[11px] text-gray-500 mt-1 truncate" title={user.last_active_at}>
+            最近活跃：{String(user.last_active_at).replace('T', ' ').slice(0, 19)}
+          </div>
         )}
       </td>
       <td className="px-3 sm:px-4 py-3 align-top whitespace-nowrap text-right">

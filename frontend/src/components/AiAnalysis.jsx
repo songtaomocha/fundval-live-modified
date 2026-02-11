@@ -14,11 +14,14 @@ export const AiAnalysis = ({ fund }) => {
     try {
       const response = await api.post('/ai/analyze_fund', {
         fund_info: fund
-      });
+      }, { timeout: 35000 });
       console.log('AI Analysis Response:', response.data);
       setAnalysis(response.data);
     } catch (err) {
-      const errorMsg = err.response?.data?.detail || err.message || '分析请求失败，请稍后重试';
+      const isTimeout = String(err?.message || '').includes('timeout');
+      const errorMsg = isTimeout
+        ? 'AI 分析稍慢，已超时。可稍后重试。'
+        : (err.response?.data?.detail || err.message || '分析请求失败，请稍后重试');
       console.error('AI Analysis Error:', err);
       setError(errorMsg);
     } finally {

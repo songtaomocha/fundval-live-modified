@@ -1,9 +1,10 @@
 import logging
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Body, Depends
-from ..services.fund import search_funds, get_fund_intraday, get_fund_history, run_daily_model_evaluation
+from ..services.fund import search_funds, get_fund_intraday, get_fund_history, run_daily_model_evaluation, get_combined_valuation
 from ..config import Config
 from ..auth import User, get_current_user
 from ..utils import get_user_id_for_query
@@ -17,8 +18,8 @@ router = APIRouter()
 _FUND_DETAIL_CACHE = {}
 _FUND_DETAIL_INFLIGHT = {}
 _FUND_DETAIL_LOCK = threading.Lock()
-_FUND_DETAIL_CACHE_TTL = 10  # seconds
-_FUND_DETAIL_STALE_TTL = 300  # seconds
+_FUND_DETAIL_CACHE_TTL = 60   # seconds（详情缓存加长，减少重复重算）
+_FUND_DETAIL_STALE_TTL = 1800  # seconds（上游抖动时优先回旧值，提升可用性）
 
 @router.get("/categories")
 def get_fund_categories():
@@ -81,6 +82,81 @@ def search(q: str = Query(..., min_length=1)):
         return search_funds(q)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+def _get_quote_payload(fund_id: str):
+    now = time.time()
+    cache_key = f"quote:{fund_id}"
+
+    cached = _FUND_DETAIL_CACHE.get(cache_key)
+    if cached and now - cached["ts"] <= _FUND_DETAIL_CACHE_TTL:
+        return cached["data"]
+
+    q = get_combined_valuation(fund_id)
+    data = {
+        "id": str(fund_id),
+        "name": q.get("name") or str(fund_id),
+        "estimate": float(q.get("estimate") or 0.0),
+        "nav": float(q.get("nav") or 0.0),
+        "estRate": float(q.get("estRate") or 0.0),
+        "time": q.get("time") or "--:--",
+        "source": q.get("source"),
+        "trusted": True,
+    }
+    _FUND_DETAIL_CACHE[cache_key] = {"data": data, "ts": time.time()}
+    return data
+
+@router.get("/fund/{fund_id}/quote")
+def fund_quote(fund_id: str):
+    """轻量报价接口：仅返回卡片展示必要字段，避免首屏调用重型详情计算。"""
+    now = time.time()
+    try:
+        return _get_quote_payload(fund_id)
+    except Exception as e:
+        cached = _FUND_DETAIL_CACHE.get(f"quote:{fund_id}")
+        if cached and now - cached["ts"] <= _FUND_DETAIL_STALE_TTL:
+            logger.warning(f"fund_quote {fund_id} upstream failed, serve stale cache: {e}")
+            return cached["data"]
+        raise HTTPException(status_code=502, detail=f"Upstream quote unavailable: {e}")
+
+@router.get("/fund/quotes")
+def fund_quotes(ids: str = Query(..., description="基金代码列表，逗号分隔，例如 161725,005827")):
+    """批量轻量报价接口：用于关注列表轮询，减少 N 次 HTTP 往返。"""
+    code_list = [c.strip() for c in (ids or "").split(",") if c.strip()]
+    if not code_list:
+        return {"items": []}
+
+    code_list = code_list[:100]
+    items = []
+
+    max_workers = min(8, max(1, len(code_list)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_get_quote_payload, code): code for code in code_list}
+        for future in as_completed(futures):
+            code = futures[future]
+            now = time.time()
+            try:
+                items.append(future.result())
+            except Exception as e:
+                cached = _FUND_DETAIL_CACHE.get(f"quote:{code}")
+                if cached and now - cached["ts"] <= _FUND_DETAIL_STALE_TTL:
+                    logger.warning(f"fund_quotes {code} upstream failed, serve stale cache: {e}")
+                    items.append(cached["data"])
+                else:
+                    logger.warning(f"fund_quotes {code} failed: {e}")
+                    items.append({
+                        "id": str(code),
+                        "name": str(code),
+                        "estimate": 0.0,
+                        "nav": 0.0,
+                        "estRate": 0.0,
+                        "time": "--:--",
+                        "source": "error",
+                        "trusted": False,
+                    })
+
+    item_map = {str(i.get("id")): i for i in items}
+    ordered = [item_map.get(code, {"id": code, "name": code, "estimate": 0.0, "nav": 0.0, "estRate": 0.0, "time": "--:--", "source": "missing", "trusted": False}) for code in code_list]
+    return {"items": ordered}
 
 @router.get("/fund/{fund_id}")
 def fund_detail(fund_id: str):

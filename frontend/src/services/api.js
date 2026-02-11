@@ -5,7 +5,7 @@ const API_BASE_URL = '/api';
 export const api = axios.create({
   baseURL: API_BASE_URL,
   withCredentials: true, // 携带认证 cookie
-  timeout: 8000,
+  timeout: 15000,
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,9 +61,32 @@ export const searchFunds = async (query) => {
   }
 };
 
+export const getFundQuote = async (fundId) => {
+  try {
+    const response = await api.get(`/fund/${fundId}/quote`);
+    return response.data;
+  } catch (error) {
+    console.error(`Get fund quote ${fundId} failed`, error);
+    throw error;
+  }
+};
+
+export const getFundQuotes = async (fundIds = []) => {
+  const ids = (fundIds || []).map(String).filter(Boolean);
+  if (ids.length === 0) return [];
+  try {
+    const response = await api.get('/fund/quotes', { params: { ids: ids.join(',') } });
+    return response.data?.items || [];
+  } catch (error) {
+    console.error('Get fund quotes failed', error);
+    throw error;
+  }
+};
+
 export const getFundDetail = async (fundId) => {
   try {
-    const response = await api.get(`/fund/${fundId}`);
+    // 详情接口包含持仓/指标等重计算，单独放宽超时，避免移动端频繁超时看不到明细
+    const response = await api.get(`/fund/${fundId}`, { timeout: 25000 });
     return response.data;
   } catch (error) {
     console.error(`Get fund ${fundId} failed`, error);
@@ -77,7 +100,7 @@ export const getFundHistory = async (fundId, limit = 30, accountId = null) => {
         if (accountId) {
             params.account_id = accountId;
         }
-        const response = await api.get(`/fund/${fundId}/history`, { params });
+        const response = await api.get(`/fund/${fundId}/history`, { params, timeout: 25000 });
         return response.data;
     } catch (error) {
         console.error("Get history failed", error);
@@ -132,11 +155,11 @@ export const getAccountPositions = async (accountId) => {
     try {
         // 如果 accountId 为 0，调用聚合端点
         if (accountId === 0) {
-            const response = await api.get('/positions/aggregate');
+            const response = await api.get('/positions/aggregate', { timeout: 25000 });
             return response.data;
         }
 
-        const response = await api.get('/account/positions', { params: { account_id: accountId } });
+        const response = await api.get('/account/positions', { params: { account_id: accountId }, timeout: 25000 });
         return response.data;
     } catch (error) {
         console.error("Get positions failed", error);

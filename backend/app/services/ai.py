@@ -299,8 +299,15 @@ class AIService:
             import traceback
             error_detail = traceback.format_exc()
             print(f"AI Analysis Error: {e}\n{error_detail}")
+
+            err_text = str(e)
+            if "No accounts available with quota" in err_text or "Token error" in err_text:
+                msg = "模型额度不足（上游账户无可用 quota），不是页面参数丢失。请切换 AI 模型或补充上游额度后重试。"
+            else:
+                msg = f"LLM 调用失败: {err_text}"
+
             return {
-                "markdown": f"## 分析失败\n\nLLM 调用失败: {str(e)}\n\n请检查 API 配置和提示词格式。",
+                "markdown": f"## 分析失败\n\n{msg}",
                 "indicators": indicators,
                 "timestamp": datetime.datetime.now().strftime("%H:%M:%S")
             }

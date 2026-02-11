@@ -36,6 +36,12 @@ _SPOT_PREFERRED_UNTIL = 0.0
 # Dirty tick guard state (in-memory, per process)
 _TICK_GUARD_STATE: Dict[str, Dict[str, Any]] = {}
 
+# Detail sub-part caches to speed up heavy sections (technical indicators / holdings parse)
+_INDICATOR_CACHE: Dict[str, Dict[str, Any]] = {}
+_HOLDINGS_BASE_CACHE: Dict[str, Dict[str, Any]] = {}
+_INDICATOR_CACHE_TTL_SECONDS = 1800   # 30 min
+_HOLDINGS_BASE_CACHE_TTL_SECONDS = 1800  # 30 min
+
 # Residual basket proxy by fund type/category
 _FUND_PROXY_MAP = {
     "偏股类": ["510300", "510500"],  # CSI300 + CSI500 ETF
@@ -72,14 +78,20 @@ def _get_http_session():
 
 
 def _run_with_timeout(fn, timeout_seconds: float, *args, **kwargs):
-    """Run blocking call with timeout; return None on timeout/error."""
+    """Run blocking call with timeout; return None on timeout/error.
+
+    注意：不能用 `with ThreadPoolExecutor(...)`，否则即使 fut.result(timeout) 超时，
+    退出 context 时也会等待线程结束，导致“看似有超时，实际仍卡住”。
+    """
+    ex = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(fn, *args, **kwargs)
-            return fut.result(timeout=timeout_seconds)
+        fut = ex.submit(fn, *args, **kwargs)
+        return fut.result(timeout=timeout_seconds)
     except Exception as e:
         logger.warning(f"Timeout or error in background call {getattr(fn, '__name__', 'fn')}: {e}")
         return None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def get_fund_type(code: str, name: str) -> str:
@@ -579,7 +591,7 @@ def get_eastmoney_pingzhong_data(code: str) -> Dict[str, Any]:
     """
     url = Config.EASTMONEY_DETAILED_API_URL.format(code=code)
     try:
-        response = _get_http_session().get(url, timeout=2.2)
+        response = _get_http_session().get(url, timeout=4.5)
         if response.status_code == 200:
             text = response.text
             data = {}
@@ -699,7 +711,7 @@ def _fetch_stock_spots_sina(codes: List[str]) -> Dict[str, float]:
     headers = {"Referer": "http://finance.sina.com.cn"}
     
     try:
-        response = _get_http_session().get(url, headers=headers, timeout=1.5)
+        response = _get_http_session().get(url, headers=headers, timeout=3.2)
         results = {}
         for line in response.text.strip().split('\n'):
             if not line or '=' not in line or '"' not in line: continue
@@ -769,7 +781,7 @@ def _fetch_stock_spots_tencent(codes: List[str]) -> Dict[str, float]:
 
     url = f"http://qt.gtimg.cn/q={','.join(formatted)}"
     try:
-        response = _get_http_session().get(url, timeout=1.5)
+        response = _get_http_session().get(url, timeout=3.2)
         text = response.text or ""
         results = {}
         for line in text.strip().split(';'):
@@ -838,7 +850,7 @@ def _fetch_stock_spots(codes: List[str]) -> Dict[str, float]:
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_sina = ex.submit(_fetch_stock_spots_sina, a_share_codes)
         fut_tencent = ex.submit(_fetch_stock_spots_tencent, a_share_codes)
-        done, pending = wait({fut_sina, fut_tencent}, timeout=1.6, return_when=FIRST_COMPLETED)
+        done, pending = wait({fut_sina, fut_tencent}, timeout=3.0, return_when=FIRST_COMPLETED)
 
         winner_res = {}
         winner = None
@@ -855,7 +867,7 @@ def _fetch_stock_spots(codes: List[str]) -> Dict[str, float]:
 
         if not winner_res:
             # wait a bit more for the other one
-            done2, _ = wait({fut_sina, fut_tencent}, timeout=1.6)
+            done2, _ = wait({fut_sina, fut_tencent}, timeout=3.0)
             for fut in done2:
                 try:
                     r = fut.result()
@@ -1199,9 +1211,8 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     confidence = em_data.get("confidence")
 
     # 1.5) Enrich with detailed info (time-budget aware)
-    pz_data = {}
-    if not _budget_exceeded(2.0):
-        pz_data = get_eastmoney_pingzhong_data(code)
+    # 避免详情页被上游卡死：对 PingZhong 再包一层硬超时
+    pz_data = _run_with_timeout(get_eastmoney_pingzhong_data, 3.2, code) or {}
     extra_info = {}
     if pz_data.get("name"): extra_info["full_name"] = pz_data["name"]
     if pz_data.get("manager"): extra_info["manager"] = pz_data["manager"]
@@ -1217,24 +1228,23 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
         name = extra_info.get("full_name", f"基金 {code}")
     manager = extra_info.get("manager", "--")
 
-    # 2) Use history from PingZhong for Indicators
-    # We take last 250 trading days (approx 1 year)
-    history_data = pz_data.get("history", [])
-    if history_data:
-        # Indicators need 1 year
-        tech_indicators = _calculate_technical_indicators(history_data[-250:])
+    # 2) Use history from PingZhong for Indicators（加缓存，避免重复算）
+    tech_indicators = {}
+    indi_cached = _INDICATOR_CACHE.get(code)
+    now_ts = time.time()
+    if indi_cached and (now_ts - indi_cached.get("ts", 0) <= _INDICATOR_CACHE_TTL_SECONDS):
+        tech_indicators = indi_cached.get("data", {})
     else:
-        # Fallback to cached history only when budget allows
-        if not _budget_exceeded(2.6):
+        # We take last 250 trading days (approx 1 year)
+        history_data = pz_data.get("history", [])
+        if history_data:
+            # Indicators need 1 year
+            tech_indicators = _calculate_technical_indicators(history_data[-250:])
+        else:
+            # 强制走本地历史兜底（主要是 SQLite 读取，成本可控）
             history_data = get_fund_history(code, limit=250)
             tech_indicators = _calculate_technical_indicators(history_data)
-        else:
-            tech_indicators = {
-                "sharpe": "--",
-                "volatility": "--",
-                "max_drawdown": "--",
-                "annual_return": "--",
-            }
+        _INDICATOR_CACHE[code] = {"data": tech_indicators, "ts": time.time()}
 
     # 3) Get holdings from AkShare + 时效衰减 + 残差篮子补全 + 动态股票仓位
     holdings = []
@@ -1244,45 +1254,78 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     holdings_age_days = 180
     residual_percent = 0.0
     residual_proxy = []
-    holdings_df = None
+
+    # 先用30分钟缓存的“基础持仓结构”（名称/代码/比例/时效）；每次仅刷新涨跌幅
+    base_cached = _HOLDINGS_BASE_CACHE.get(code)
+    base_holdings = []
+    if base_cached and (time.time() - base_cached.get("ts", 0) <= _HOLDINGS_BASE_CACHE_TTL_SECONDS):
+        base_holdings = base_cached.get("items", []) or []
+        concentration_rate = float(base_cached.get("concentration_rate", 0.0))
+        holdings_decay = float(base_cached.get("holdings_decay", 0.65))
+        holdings_age_days = int(base_cached.get("holdings_age_days", 180))
+
     try:
-        if not _budget_exceeded(3.2):
-            current_year = str(time.localtime().tm_year)
-            holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 2.8, symbol=code, date=current_year)
-            if (holdings_df is None or holdings_df.empty) and not _budget_exceeded(3.8):
-                 prev_year = str(time.localtime().tm_year - 1)
-                 holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 2.4, symbol=code, date=prev_year)
+        if not base_holdings:
+            holdings_df = None
+            if not _budget_exceeded(7.0):
+                current_year = str(time.localtime().tm_year)
+                holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 3.0, symbol=code, date=current_year)
+                # 年初/当年未披露时，快速回退上一年（否则会出现持仓全空）
+                if (holdings_df is None or holdings_df.empty) and not _budget_exceeded(5.8):
+                    prev_year = str(time.localtime().tm_year - 1)
+                    # 上一年持仓接口有时较慢，适当放宽一次，命中后走30分钟缓存
+                    holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 4.2, symbol=code, date=prev_year)
 
-        if holdings_df is not None and not holdings_df.empty:
-            holdings_df = holdings_df.copy()
-            if "占净值比例" in holdings_df.columns:
-                holdings_df["占净值比例"] = (
-                    holdings_df["占净值比例"].astype(str).str.replace("%", "", regex=False)
-                )
-                holdings_df["占净值比例"] = pd.to_numeric(holdings_df["占净值比例"], errors="coerce").fillna(0.0)
+            if holdings_df is not None and not holdings_df.empty:
+                holdings_df = holdings_df.copy()
+                if "占净值比例" in holdings_df.columns:
+                    holdings_df["占净值比例"] = (
+                        holdings_df["占净值比例"].astype(str).str.replace("%", "", regex=False)
+                    )
+                    holdings_df["占净值比例"] = pd.to_numeric(holdings_df["占净值比例"], errors="coerce").fillna(0.0)
 
-            sorted_holdings = holdings_df.sort_values(by="占净值比例", ascending=False)
-            top10 = sorted_holdings.head(10)
-            concentration_rate = float(top10["占净值比例"].sum())
+                sorted_holdings = holdings_df.sort_values(by="占净值比例", ascending=False)
+                top10 = sorted_holdings.head(10)
+                concentration_rate = float(top10["占净值比例"].sum())
+                holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(holdings_df)
 
-            holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(holdings_df)
+                seen_codes = set()
+                for _, row in sorted_holdings.iterrows():
+                    stock_code = str(row.get("股票代码"))
+                    percent = float(row.get("占净值比例", 0.0))
+                    if stock_code in seen_codes or percent < 0.01:
+                        continue
+                    seen_codes.add(stock_code)
+                    base_holdings.append({
+                        "code": stock_code,
+                        "name": row.get("股票名称"),
+                        "percent": percent,
+                    })
+                base_holdings = base_holdings[:20]
+                _HOLDINGS_BASE_CACHE[code] = {
+                    "items": base_holdings,
+                    "concentration_rate": concentration_rate,
+                    "holdings_decay": holdings_decay,
+                    "holdings_age_days": holdings_age_days,
+                    "ts": time.time(),
+                }
 
-            stock_codes = [str(c) for c in holdings_df["股票代码"].tolist() if c]
-            spot_map = _fetch_stock_spots(stock_codes) if not _budget_exceeded(4.2) else {}
+        # 每次请求都尽量刷新这20只的涨跌（比全量股票更快）
+        stock_codes = [h.get("code") for h in base_holdings if h.get("code")]
+        # 优先保证持仓涨跌可用：即使超预算也至少走一次腾讯快速兜底
+        if stock_codes:
+            if not _budget_exceeded(4.2):
+                spot_map = _fetch_stock_spots(stock_codes)
+            else:
+                spot_map = _fetch_stock_spots_tencent(stock_codes[:30])
+        else:
+            spot_map = {}
 
-            seen_codes = set()
-            for _, row in sorted_holdings.iterrows():
-                stock_code = str(row.get("股票代码"))
-                percent = float(row.get("占净值比例", 0.0))
-                if stock_code in seen_codes or percent < 0.01:
-                    continue
-                seen_codes.add(stock_code)
-                holdings.append({
-                    "name": row.get("股票名称"),
-                    "percent": percent,
-                    "change": spot_map.get(stock_code, 0.0),
-                })
-            holdings = holdings[:20]
+        holdings = [{
+            "name": h.get("name"),
+            "percent": float(h.get("percent", 0.0)),
+            "change": spot_map.get(h.get("code")),
+        } for h in base_holdings]
     except Exception as e:
         logger.warning(f"holdings parse failed for {code}: {e}")
 
@@ -1295,7 +1338,8 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     residual_percent = max(stock_exposure * 100.0 - concentration_rate, 0.0)
     proxy_codes = _FUND_PROXY_MAP.get(sector) or _FUND_PROXY_MAP.get(major_category) or _FUND_PROXY_MAP.get("偏股类", ["510300"])
     residual_spots = _fetch_stock_spots(proxy_codes) if (proxy_codes and not _budget_exceeded(4.5)) else {}
-    if residual_percent > 0.2 and proxy_codes:
+    # 仅在已有真实持仓时才展示残差篮子，避免页面只剩“残差代理”造成误导
+    if residual_percent > 0.2 and proxy_codes and len(holdings) > 0:
         per_bucket = residual_percent / len(proxy_codes)
         for pcode in proxy_codes:
             residual_proxy.append({
