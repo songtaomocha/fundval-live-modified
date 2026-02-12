@@ -751,6 +751,35 @@ def init_db():
 
         cursor.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (11)")
 
+    # Profile-driven auto-correction tables (idempotent)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fund_model_profile (
+            code TEXT PRIMARY KEY,
+            profile_json TEXT,
+            risk_level TEXT,
+            drift_state TEXT,
+            regime TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fund_model_correction_daily (
+            code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            level TEXT,
+            reason_codes TEXT,
+            bucket TEXT,
+            bias_adj REAL,
+            scale_adj REAL,
+            nav_blend REAL,
+            confidence_penalty REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (code, trade_date)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_corr_date ON fund_model_correction_daily(trade_date)")
+
     # Ensure high-frequency query indexes exist (idempotent)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_account_code ON positions(account_id, code)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_positions_account_shares ON positions(account_id, shares)")

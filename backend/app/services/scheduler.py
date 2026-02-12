@@ -142,6 +142,9 @@ def collect_intraday_snapshots():
         conn.close()
         return
 
+    # 收集 codes 后立刻释放读取连接，避免长时间占用 DB
+    conn.close()
+
     # 4. Collect valuation data
     date_str = today.strftime("%Y-%m-%d")
     time_str = now_cst.strftime("%H:%M")
@@ -149,19 +152,25 @@ def collect_intraday_snapshots():
     collected = 0
     skipped = 0
     fallback_used = 0
+
+    # 写入使用单独连接；每只基金单独提交，减少写锁持有时长
+    write_conn = get_db_connection()
+    write_cursor = write_conn.cursor()
+
     for code in codes:
         try:
             data = get_combined_valuation(code)
             if data and data.get("estimate"):
-                cursor.execute("""
+                write_cursor.execute("""
                     INSERT OR REPLACE INTO fund_intraday_snapshots
                     (fund_code, date, time, estimate)
                     VALUES (?, ?, ?, ?)
                 """, (code, date_str, time_str, float(data["estimate"])))
+                write_conn.commit()
                 collected += 1
             else:
                 # Fallback: carry forward latest known estimate for this fund (today first, then latest overall)
-                fallback_row = cursor.execute("""
+                fallback_row = write_cursor.execute("""
                     SELECT estimate FROM fund_intraday_snapshots
                     WHERE fund_code = ? AND date = ?
                     ORDER BY time DESC
@@ -169,7 +178,7 @@ def collect_intraday_snapshots():
                 """, (code, date_str)).fetchone()
 
                 if not fallback_row:
-                    fallback_row = cursor.execute("""
+                    fallback_row = write_cursor.execute("""
                         SELECT estimate FROM fund_intraday_snapshots
                         WHERE fund_code = ?
                         ORDER BY date DESC, time DESC
@@ -177,11 +186,12 @@ def collect_intraday_snapshots():
                     """, (code,)).fetchone()
 
                 if fallback_row and fallback_row["estimate"] is not None:
-                    cursor.execute("""
+                    write_cursor.execute("""
                         INSERT OR REPLACE INTO fund_intraday_snapshots
                         (fund_code, date, time, estimate)
                         VALUES (?, ?, ?, ?)
                     """, (code, date_str, time_str, float(fallback_row["estimate"])))
+                    write_conn.commit()
                     collected += 1
                     fallback_used += 1
                     logger.warning(f"Fallback used for {code} at {time_str}: carried forward latest estimate")
@@ -193,18 +203,19 @@ def collect_intraday_snapshots():
         except Exception as e:
             # Exception fallback: try carry-forward to avoid broken chart continuity
             try:
-                fallback_row = cursor.execute("""
+                fallback_row = write_cursor.execute("""
                     SELECT estimate FROM fund_intraday_snapshots
                     WHERE fund_code = ?
                     ORDER BY date DESC, time DESC
                     LIMIT 1
                 """, (code,)).fetchone()
                 if fallback_row and fallback_row["estimate"] is not None:
-                    cursor.execute("""
+                    write_cursor.execute("""
                         INSERT OR REPLACE INTO fund_intraday_snapshots
                         (fund_code, date, time, estimate)
                         VALUES (?, ?, ?, ?)
                     """, (code, date_str, time_str, float(fallback_row["estimate"])))
+                    write_conn.commit()
                     collected += 1
                     fallback_used += 1
                     logger.warning(f"Fallback(ex) used for {code} at {time_str}: {e}")
@@ -215,8 +226,7 @@ def collect_intraday_snapshots():
                 skipped += 1
                 logger.error(f"Intraday collect failed for {code}: {e}; fallback failed: {e2}")
 
-    conn.commit()
-    conn.close()
+    write_conn.close()
 
     if collected > 0:
         logger.info(f"Collected {collected} intraday snapshots at {time_str} (fallback {fallback_used}, skipped {skipped})")

@@ -430,18 +430,42 @@ def get_positions(
         data = get_all_positions(account_id, user_id)
         _ACCOUNT_POS_CACHE[cache_key] = {"data": data, "ts": time.time()}
         return data
-    except HTTPException:
+    except HTTPException as e:
         cached = _ACCOUNT_POS_CACHE.get(cache_key)
         if cached and now - cached["ts"] <= _ACCOUNT_POS_STALE_TTL:
             logger.warning(f"get_positions {cache_key} failed, serve stale cache")
             return cached["data"]
-        raise
+        # 无缓存时返回降级响应，避免前端反复 502 重试风暴
+        logger.error(f"get_positions {cache_key} http error, serve degraded response: {e}")
+        return {
+            "summary": {
+                "total_market_value": 0.0,
+                "total_cost": 0.0,
+                "total_day_income": 0.0,
+                "total_income": 0.0,
+                "total_return_rate": 0.0
+            },
+            "positions": [],
+            "degraded": True
+        }
     except Exception as e:
         cached = _ACCOUNT_POS_CACHE.get(cache_key)
         if cached and now - cached["ts"] <= _ACCOUNT_POS_STALE_TTL:
             logger.warning(f"get_positions {cache_key} upstream failed, serve stale cache: {e}")
             return cached["data"]
-        raise HTTPException(status_code=502, detail=f"Upstream account valuation unavailable: {e}")
+        # 无缓存时返回降级响应，避免前端反复 502 重试风暴
+        logger.error(f"get_positions {cache_key} upstream failed, serve degraded response: {e}")
+        return {
+            "summary": {
+                "total_market_value": 0.0,
+                "total_cost": 0.0,
+                "total_day_income": 0.0,
+                "total_income": 0.0,
+                "total_return_rate": 0.0
+            },
+            "positions": [],
+            "degraded": True
+        }
     finally:
         if owner:
             with _ACCOUNT_POS_LOCK:

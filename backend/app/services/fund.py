@@ -380,6 +380,250 @@ def _get_recent_calibration(code: str, lookback_days: int = 20) -> Dict[str, Any
             conn.close()
 
 
+def _get_time_bucket(hhmm: str | None = None) -> str:
+    try:
+        t = hhmm or time.strftime("%H:%M")
+        hh, mm = t.split(":")[:2]
+        v = int(hh) * 60 + int(mm)
+    except Exception:
+        v = 14 * 60
+
+    if 9 * 60 + 30 <= v < 10 * 60:
+        return "open"
+    if 10 * 60 <= v < 11 * 60 + 30:
+        return "morning"
+    if 13 * 60 <= v < 14 * 60 + 30:
+        return "afternoon"
+    if 14 * 60 + 30 <= v <= 15 * 60 + 5:
+        return "close"
+    return "off"
+
+
+def _build_profile_from_eval(code: str, fund_type: str, lookback_days: int = 30) -> Dict[str, Any]:
+    """构建基金画像（自动）：风险等级、漂移状态、分时偏差。"""
+    profile = {
+        "code": code,
+        "fundType": fund_type or "未知",
+        "riskLevel": "B",
+        "driftState": "two_sided",
+        "regime": "normal",
+        "bucketBiasPct": {"open": 0.0, "morning": 0.0, "afternoon": 0.0, "close": 0.0},
+        "dataQuality": "normal",
+        "samples": 0,
+    }
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT mae, direction_acc, close_error, bias, scale, samples
+            FROM fund_model_eval_daily
+            WHERE code = ?
+            ORDER BY trade_date DESC
+            LIMIT ?
+        """, (code, max(5, lookback_days)))
+        eval_rows = cursor.fetchall() or []
+
+        cursor.execute("""
+            SELECT date, time, estimate
+            FROM fund_intraday_snapshots
+            WHERE fund_code = ?
+            ORDER BY date DESC, time DESC
+            LIMIT 400
+        """, (code,))
+        snaps = cursor.fetchall() or []
+
+        cursor.execute("""
+            SELECT date, nav
+            FROM fund_history
+            WHERE code = ?
+            ORDER BY date DESC
+            LIMIT 90
+        """, (code,))
+        nav_rows = cursor.fetchall() or []
+
+        profile["samples"] = len(eval_rows)
+
+        if eval_rows:
+            maes = [float(r["mae"]) for r in eval_rows if r["mae"] is not None]
+            dirs = [float(r["direction_acc"]) for r in eval_rows if r["direction_acc"] is not None]
+            biases = [float(r["bias"]) for r in eval_rows if r["bias"] is not None]
+            close_err = [float(r["close_error"]) for r in eval_rows if r["close_error"] is not None]
+
+            mae_avg = (sum(maes) / len(maes)) if maes else 1.2
+            dir_avg = (sum(dirs) / len(dirs)) if dirs else 50.0
+            bias_avg = (sum(biases) / len(biases)) if biases else 0.0
+
+            if mae_avg <= 0.5 and dir_avg >= 62:
+                profile["riskLevel"] = "A"
+            elif mae_avg <= 1.2 and dir_avg >= 52:
+                profile["riskLevel"] = "B"
+            else:
+                profile["riskLevel"] = "C"
+
+            if abs(bias_avg) < 0.002:
+                profile["driftState"] = "two_sided"
+            elif bias_avg > 0:
+                profile["driftState"] = "under_estimate"
+            else:
+                profile["driftState"] = "over_estimate"
+
+            if close_err:
+                ce_avg = sum(close_err) / len(close_err)
+                if ce_avg >= 2.0:
+                    profile["regime"] = "extreme"
+                elif ce_avg >= 1.2:
+                    profile["regime"] = "volatile"
+
+        if snaps and nav_rows:
+            nav_map = {str(r["date"]): float(r["nav"]) for r in nav_rows if r["nav"] is not None and float(r["nav"]) > 0}
+            bucket_errs: Dict[str, List[float]] = {"open": [], "morning": [], "afternoon": [], "close": []}
+            for s in snaps:
+                d = str(s["date"])
+                if d not in nav_map:
+                    continue
+                nav = nav_map[d]
+                est = float(s["estimate"])
+                if nav <= 0 or est <= 0:
+                    continue
+                b = _get_time_bucket(str(s["time"]))
+                if b in bucket_errs:
+                    bucket_errs[b].append((est - nav) / nav * 100.0)
+            for k, arr in bucket_errs.items():
+                if arr:
+                    profile["bucketBiasPct"][k] = round(sum(arr) / len(arr), 4)
+
+        if "QDII" in (fund_type or ""):
+            profile["dataQuality"] = "fx_sensitive"
+        elif "债" in (fund_type or ""):
+            profile["dataQuality"] = "stable"
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO fund_model_profile
+            (code, profile_json, risk_level, drift_state, regime, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (
+            code,
+            json.dumps(profile, ensure_ascii=False),
+            profile["riskLevel"],
+            profile["driftState"],
+            profile["regime"],
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"profile build failed for {code}: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return profile
+
+
+def _get_profile(code: str, fund_type: str) -> Dict[str, Any]:
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT profile_json, updated_at FROM fund_model_profile WHERE code=?", (code,))
+        row = cursor.fetchone()
+        if row and row["profile_json"]:
+            try:
+                p = json.loads(row["profile_json"])
+                upd = row["updated_at"]
+                is_stale = True
+                if upd:
+                    try:
+                        dt = datetime.strptime(str(upd)[:19], "%Y-%m-%d %H:%M:%S")
+                        is_stale = (datetime.now() - dt).total_seconds() > 86400
+                    except Exception:
+                        is_stale = True
+                if not is_stale:
+                    return p
+            except Exception:
+                pass
+    except Exception:
+        pass
+    finally:
+        if conn:
+            conn.close()
+
+    return _build_profile_from_eval(code, fund_type)
+
+
+def _compute_profile_correction(code: str, fund_type: str, estimate: float, nav: float, calib: Dict[str, Any], spread: float) -> Dict[str, Any]:
+    """画像驱动纠偏：返回 level/reasons/修正参数。"""
+    profile = _get_profile(code, fund_type)
+    bucket = _get_time_bucket()
+    bucket_bias_pct = float(profile.get("bucketBiasPct", {}).get(bucket, 0.0) or 0.0)
+
+    calib_mae = float(calib.get("mae") or 1.4)
+    spread_pct = (spread / max(estimate, 1e-6)) * 100.0 if estimate > 0 else 0.0
+
+    level = "L1"
+    reasons = []
+    if profile.get("riskLevel") == "C" or calib_mae >= 1.4 or spread_pct >= 1.2:
+        level = "L2"
+    if profile.get("regime") == "extreme" or spread_pct >= 2.2 or calib_mae >= 2.2:
+        level = "L3"
+
+    if abs(bucket_bias_pct) >= 0.08:
+        reasons.append("time_bucket_bias")
+    if spread_pct >= 1.0:
+        reasons.append("source_divergence")
+    if profile.get("dataQuality") == "fx_sensitive":
+        reasons.append("fx_sensitive")
+
+    bias_adj = -bucket_bias_pct / 100.0 * max(nav, estimate)
+    scale_adj = 1.0
+    nav_blend = 0.0
+    confidence_penalty = 0.0
+
+    if level == "L2":
+        scale_adj = 0.998 if bucket_bias_pct > 0 else 1.002
+        confidence_penalty = 8.0
+    elif level == "L3":
+        nav_blend = 0.35
+        confidence_penalty = 18.0
+
+    # 保存每日动作（审计）
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        trade_date = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("""
+            INSERT OR REPLACE INTO fund_model_correction_daily
+            (code, trade_date, level, reason_codes, bucket, bias_adj, scale_adj, nav_blend, confidence_penalty, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (
+            code,
+            trade_date,
+            level,
+            ",".join(reasons),
+            bucket,
+            float(bias_adj),
+            float(scale_adj),
+            float(nav_blend),
+            float(confidence_penalty),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return {
+        "profile": profile,
+        "bucket": bucket,
+        "level": level,
+        "reasons": reasons,
+        "biasAdj": bias_adj,
+        "scaleAdj": scale_adj,
+        "navBlend": nav_blend,
+        "confidencePenalty": confidence_penalty,
+    }
+
+
 def _apply_tick_guard(code: str, estimate: float, nav: float) -> Tuple[float, Dict[str, Any]]:
     """异常点检测与限速（脏tick防护）。"""
     now = time.time()
@@ -508,7 +752,22 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
     if nav_val <= 0:
         nav_val = calibrated_estimate
 
-    guarded_estimate, tick_guard = _apply_tick_guard(code, calibrated_estimate, nav_val)
+    fund_type = get_fund_type(code, fund_name)
+    correction = _compute_profile_correction(
+        code=code,
+        fund_type=fund_type,
+        estimate=calibrated_estimate,
+        nav=nav_val,
+        calib=calib,
+        spread=spread,
+    )
+
+    corrected_estimate = (calibrated_estimate + float(correction.get("biasAdj", 0.0))) * float(correction.get("scaleAdj", 1.0))
+    nav_blend = float(correction.get("navBlend", 0.0))
+    if nav_blend > 0 and nav_val > 0:
+        corrected_estimate = corrected_estimate * (1.0 - nav_blend) + nav_val * nav_blend
+
+    guarded_estimate, tick_guard = _apply_tick_guard(code, corrected_estimate, nav_val)
 
     est_rate = ((guarded_estimate - nav_val) / nav_val * 100.0) if nav_val > 0 else 0.0
     update_time = em_data.get("time") if em_data else (sina_data.get("time") if sina_data else time.strftime("%H:%M"))
@@ -516,7 +775,8 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
     source_score = max(0.0, 1.0 - (spread / max(guarded_estimate, 1e-6)) * 8.0)
     calibration_score = max(0.0, 1.0 - ((calib.get("mae") or 1.2) / 1.5))
     anomaly_penalty = 0.35 if tick_guard.get("dirty") else (0.18 if tick_guard.get("rate_limited") else 0.0)
-    confidence = max(5.0, min(99.0, (0.48 * source_score + 0.42 * calibration_score + 0.10 * (1.0 - anomaly_penalty)) * 100.0))
+    profile_penalty = float(correction.get("confidencePenalty", 0.0)) / 100.0
+    confidence = max(5.0, min(99.0, (0.48 * source_score + 0.42 * calibration_score + 0.10 * (1.0 - anomaly_penalty) - profile_penalty) * 100.0))
 
     payload = {
         "code": code,
@@ -530,11 +790,21 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
         "sources": [{"name": c["source"], "estimate": round(float(c["estimate"]), 6), "weight": float(c.get("weight", 0.0))} for c in candidates],
         "calibration": calib,
         "tickGuard": tick_guard,
+        "modelProfile": correction.get("profile", {}),
+        "correction": {
+            "level": correction.get("level"),
+            "bucket": correction.get("bucket"),
+            "reasonCodes": correction.get("reasons", []),
+            "biasAdj": round(float(correction.get("biasAdj", 0.0)), 8),
+            "scaleAdj": round(float(correction.get("scaleAdj", 1.0)), 8),
+            "navBlend": round(float(correction.get("navBlend", 0.0)), 4),
+        },
         "confidence": round(float(confidence), 2),
         "confidenceDetail": {
             "source_consistency": round(source_score * 100.0, 2),
             "calibration_quality": round(calibration_score * 100.0, 2),
             "anomaly_penalty": round(anomaly_penalty * 100.0, 2),
+            "profile_penalty": round(profile_penalty * 100.0, 2),
         },
     }
     return _cache_and_return(payload)

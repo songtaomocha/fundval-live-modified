@@ -10,7 +10,7 @@ const toMinutes = (time) => {
 };
 
 const isTradingMinute = (mins) => {
-  const morningOpen = 9 * 60;
+  const morningOpen = 9 * 60 + 30;
   const morningClose = 11 * 60 + 30;
   const afternoonOpen = 13 * 60;
   const afternoonClose = 15 * 60;
@@ -109,7 +109,7 @@ export const IntradayChart = ({ fundId }) => {
 
   // 11:30 与 13:00 重合，仅显示 13:00
   const xTicks = [
-    { v: 9 * 60, label: '09:00' },
+    { v: 9 * 60 + 30, label: '09:30' },
     { v: 10 * 60, label: '10:00' },
     { v: 11 * 60, label: '11:00' },
     { v: compressTradingX(13 * 60), label: '13:00' },
@@ -118,7 +118,7 @@ export const IntradayChart = ({ fundId }) => {
   ];
   const tickMap = new Map(xTicks.map((t) => [t.v, t.label]));
 
-  const xMin = 9 * 60;
+  const xMin = 9 * 60 + 30;
   const xMax = compressTradingX(15 * 60);
 
   const lastPoint = chartData[chartData.length - 1];
@@ -243,7 +243,7 @@ export const IntradayChart = ({ fundId }) => {
       </div>
 
       <div className="mt-2 text-xs text-slate-500 text-center">
-        数据采集仅在系统开启时运行（交易日 09:00-15:00）
+        数据采集仅在系统开启时运行（交易日 09:30-15:00）
       </div>
     </div>
   );

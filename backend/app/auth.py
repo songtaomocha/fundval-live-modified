@@ -3,6 +3,7 @@
 """
 import bcrypt
 import secrets
+import sqlite3
 from typing import Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from .db import get_db_connection
 # Session 配置
 SESSION_COOKIE_NAME = "session_id"
 SESSION_EXPIRY_DAYS = 30
+# 仅在会话临近过期时才续期，避免每次请求都写库导致锁竞争
+SESSION_REFRESH_THRESHOLD_HOURS = 12
 
 
 @dataclass
@@ -168,13 +171,20 @@ def get_session_user(session_id: str) -> Optional[int]:
             conn.commit()
             return None
 
-        # 续期：每次访问延长 30 天
-        new_expiry = (datetime.now() + timedelta(days=SESSION_EXPIRY_DAYS)).isoformat()
-        cursor.execute(
-            "UPDATE user_sessions SET expiry = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
-            (new_expiry, session_id)
-        )
-        conn.commit()
+        # 续期：仅在临近过期时才续期，减少高频写入
+        now = datetime.now()
+        refresh_threshold = timedelta(hours=SESSION_REFRESH_THRESHOLD_HOURS)
+        if (expiry - now) <= refresh_threshold:
+            new_expiry = (now + timedelta(days=SESSION_EXPIRY_DAYS)).isoformat()
+            try:
+                cursor.execute(
+                    "UPDATE user_sessions SET expiry = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                    (new_expiry, session_id)
+                )
+                conn.commit()
+            except sqlite3.OperationalError:
+                # 遇到瞬时锁冲突时不阻塞请求，保持当前会话继续可用
+                pass
 
         return int(row[0])
     finally:
