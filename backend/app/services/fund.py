@@ -1554,10 +1554,26 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
                     )
                     holdings_df["占净值比例"] = pd.to_numeric(holdings_df["占净值比例"], errors="coerce").fillna(0.0)
 
-                sorted_holdings = holdings_df.sort_values(by="占净值比例", ascending=False)
+                # 严格按“最新已披露季度”口径展示持仓，避免跨季度拼接导致明细与外部口径不一致
+                latest_quarter_df = holdings_df
+                if "季度" in holdings_df.columns:
+                    q_series = holdings_df["季度"].astype(str)
+
+                    def _quarter_sort_key(q: str):
+                        m = re.search(r"(\d{4})年([1-4])季度", q)
+                        if not m:
+                            return (-1, -1)
+                        return (int(m.group(1)), int(m.group(2)))
+
+                    unique_quarters = [q for q in q_series.dropna().unique().tolist() if q and q != "nan"]
+                    if unique_quarters:
+                        latest_quarter = max(unique_quarters, key=_quarter_sort_key)
+                        latest_quarter_df = holdings_df[q_series == latest_quarter]
+
+                sorted_holdings = latest_quarter_df.sort_values(by="占净值比例", ascending=False)
                 top10 = sorted_holdings.head(10)
                 concentration_rate = float(top10["占净值比例"].sum())
-                holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(holdings_df)
+                holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(latest_quarter_df)
 
                 seen_codes = set()
                 for _, row in sorted_holdings.iterrows():
