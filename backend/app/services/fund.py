@@ -251,11 +251,24 @@ def _get_global_setting(key: str, default: str) -> str:
 
 def _estimate_stock_exposure(fund_type: str, concentration_rate: float, holdings_count: int) -> float:
     """动态估计 stock_exposure（股票仓位）。"""
-    ft = fund_type or ""
+    ft = (fund_type or "").strip()
     if ft.startswith("货币") or "货币" in ft:
         return 0.0
-    if "债" in ft and "可转债" not in ft:
-        base = 0.15
+
+    # 口径约束：混合一级债基视作“无股票仓位”；二级债基才重点核验权益暴露。
+    is_primary_bond = any(k in ft for k in ["一级债", "混合一级债"]) or ft.startswith("债券型-长债")
+    is_secondary_bond = any(k in ft for k in ["二级债", "混合二级债"])
+    is_debt_fund = ("债" in ft and "可转债" not in ft)
+
+    if is_primary_bond:
+        return 0.0
+
+    if is_secondary_bond:
+        # 二级债基通常含一定权益敞口，但披露可能不完整，给一个偏保守基线。
+        base = 0.12
+    elif is_debt_fund:
+        # 纯债/一级债以外的债券类默认按接近零权益处理。
+        base = 0.02
     elif "QDII" in ft or "股票" in ft or "偏股" in ft or "指数" in ft or "混合" in ft:
         base = 0.88
     elif "商品" in ft or "REIT" in ft or "Reits" in ft:
@@ -267,7 +280,30 @@ def _estimate_stock_exposure(fund_type: str, concentration_rate: float, holdings
     depth_adj = min(max((concentration_rate - 40.0) / 100.0, -0.2), 0.12)
     count_adj = 0.03 if holdings_count >= 15 else (-0.05 if holdings_count <= 5 else 0.0)
     exposure = min(max(base + depth_adj + count_adj, 0.0), 0.98)
+
+    # 仅对二级债基做“明细反推”下限，避免出现“有股票明细却权益=0%”
+    if is_secondary_bond and holdings_count > 0 and concentration_rate > 0:
+        inferred_floor = min(max((concentration_rate / 100.0) * 2.2, 0.03), 0.35)
+        exposure = max(exposure, inferred_floor)
+
     return round(exposure, 4)
+
+
+def _is_convertible_bond_holding(code: str, name: str) -> bool:
+    """识别可转债持仓（用于单独估算转债暴露）。"""
+    n = (name or "").strip()
+    c = re.sub(r"\D", "", str(code or "").strip())
+
+    if "转债" in n:
+        return True
+
+    # A股可转债常见代码段（上海11/113/118，深圳12/123/127/128/11x/12x）
+    if len(c) == 6 and (c.startswith("11") or c.startswith("12")):
+        return True
+    if len(c) == 6 and c.startswith(("113", "118", "123", "127", "128", "111")):
+        return True
+
+    return False
 
 
 def _compute_holdings_timeliness_decay(holdings_df: pd.DataFrame, half_life_days: int = 120) -> Tuple[float, int]:
@@ -1520,6 +1556,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     holdings = []
     concentration_rate = 0.0
     stock_exposure = 0.0
+    cb_exposure = 0.0
     holdings_decay = 0.65
     holdings_age_days = 180
     residual_percent = 0.0
@@ -1554,10 +1591,13 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
                     )
                     holdings_df["占净值比例"] = pd.to_numeric(holdings_df["占净值比例"], errors="coerce").fillna(0.0)
 
-                # 严格按“最新已披露季度”口径展示持仓，避免跨季度拼接导致明细与外部口径不一致
-                latest_quarter_df = holdings_df
-                if "季度" in holdings_df.columns:
-                    q_series = holdings_df["季度"].astype(str)
+                def _select_latest_quarter(df: pd.DataFrame) -> pd.DataFrame:
+                    if df is None or df.empty or "季度" not in df.columns:
+                        return df
+                    q_series = df["季度"].astype(str)
+                    unique_quarters = [q for q in q_series.dropna().unique().tolist() if q and q != "nan"]
+                    if not unique_quarters:
+                        return df
 
                     def _quarter_sort_key(q: str):
                         m = re.search(r"(\d{4})年([1-4])季度", q)
@@ -1565,28 +1605,67 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
                             return (-1, -1)
                         return (int(m.group(1)), int(m.group(2)))
 
-                    unique_quarters = [q for q in q_series.dropna().unique().tolist() if q and q != "nan"]
-                    if unique_quarters:
-                        latest_quarter = max(unique_quarters, key=_quarter_sort_key)
-                        latest_quarter_df = holdings_df[q_series == latest_quarter]
+                    latest_quarter = max(unique_quarters, key=_quarter_sort_key)
+                    return df[q_series == latest_quarter]
 
-                sorted_holdings = latest_quarter_df.sort_values(by="占净值比例", ascending=False)
-                top10 = sorted_holdings.head(10)
-                concentration_rate = float(top10["占净值比例"].sum())
-                holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(latest_quarter_df)
+                latest_stock_df = _select_latest_quarter(holdings_df)
+
+                # 额外拉取债券持仓（含可转债），避免仅股票口径漏掉转债明细
+                bond_df = _run_with_timeout(ak.fund_portfolio_bond_hold_em, 3.5, symbol=code, date=current_year)
+                if bond_df is None or bond_df.empty:
+                    prev_year = str(time.localtime().tm_year - 1)
+                    bond_df = _run_with_timeout(ak.fund_portfolio_bond_hold_em, 4.2, symbol=code, date=prev_year)
+
+                latest_bond_df = None
+                if bond_df is not None and not bond_df.empty:
+                    bond_df = bond_df.copy()
+                    if "占净值比例" in bond_df.columns:
+                        bond_df["占净值比例"] = (
+                            bond_df["占净值比例"].astype(str).str.replace("%", "", regex=False)
+                        )
+                        bond_df["占净值比例"] = pd.to_numeric(bond_df["占净值比例"], errors="coerce").fillna(0.0)
+                    latest_bond_df = _select_latest_quarter(bond_df)
+
+                merged_rows = []
+
+                def _collect_rows(df: pd.DataFrame):
+                    if df is None or df.empty:
+                        return
+                    for _, row in df.iterrows():
+                        sec_code = str(
+                            row.get("股票代码") or row.get("债券代码") or row.get("证券代码") or row.get("资产代码") or ""
+                        ).strip()
+                        sec_name = str(
+                            row.get("股票名称") or row.get("债券名称") or row.get("证券名称") or row.get("资产名称") or ""
+                        ).strip()
+                        pct = float(row.get("占净值比例", 0.0))
+                        if (not sec_code and not sec_name) or pct < 0.01:
+                            continue
+                        merged_rows.append({"code": sec_code, "name": sec_name, "percent": pct})
+
+                _collect_rows(latest_stock_df)
+                _collect_rows(latest_bond_df)
+                merged_rows.sort(key=lambda x: x["percent"], reverse=True)
+
+                concentration_rate = float(sum(item["percent"] for item in merged_rows[:10]))
+                holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(latest_stock_df)
 
                 seen_codes = set()
-                for _, row in sorted_holdings.iterrows():
-                    stock_code = str(row.get("股票代码"))
-                    percent = float(row.get("占净值比例", 0.0))
-                    if stock_code in seen_codes or percent < 0.01:
+                for item in merged_rows:
+                    sec_code = item["code"]
+                    sec_name = item["name"]
+                    percent = item["percent"]
+                    dedup_key = sec_code or sec_name
+                    if dedup_key in seen_codes:
                         continue
-                    seen_codes.add(stock_code)
+                    seen_codes.add(dedup_key)
                     base_holdings.append({
-                        "code": stock_code,
-                        "name": row.get("股票名称"),
+                        "code": sec_code,
+                        "name": sec_name,
                         "percent": percent,
+                        "isConvertibleBond": _is_convertible_bond_holding(sec_code, sec_name),
                     })
+
                 base_holdings = base_holdings[:20]
                 _HOLDINGS_BASE_CACHE[code] = {
                     "items": base_holdings,
@@ -1611,6 +1690,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "name": h.get("name"),
             "percent": float(h.get("percent", 0.0)),
             "change": spot_map.get(h.get("code")),
+            "isConvertibleBond": bool(h.get("isConvertibleBond", False)),
         } for h in base_holdings]
     except Exception as e:
         logger.warning(f"holdings parse failed for {code}: {e}")
@@ -1618,10 +1698,17 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     # 4) Determine sector/type
     sector = get_fund_type(code, name)
     major_category = get_fund_category(sector)
-    stock_exposure = _estimate_stock_exposure(sector, concentration_rate, len(holdings))
+
+    cb_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("isConvertibleBond"))
+    eq_percent = max(concentration_rate - cb_percent, 0.0)
+    eq_count = sum(1 for h in holdings if not h.get("isConvertibleBond"))
+
+    stock_exposure = _estimate_stock_exposure(sector, eq_percent, eq_count)
+    cb_exposure = min(max(cb_percent / 100.0, 0.0), 0.6)
+    total_risk_exposure = min(max(stock_exposure + cb_exposure, 0.0), 0.98)
 
     # 5) Top10 外残差篮子补全（按基金类型映射指数代理）
-    residual_percent = max(stock_exposure * 100.0 - concentration_rate, 0.0)
+    residual_percent = max(stock_exposure * 100.0 - eq_percent, 0.0)
     proxy_codes = _FUND_PROXY_MAP.get(sector) or _FUND_PROXY_MAP.get(major_category) or _FUND_PROXY_MAP.get("偏股类", ["510300"])
     residual_spots = _fetch_stock_spots(proxy_codes) if (proxy_codes and not _budget_exceeded(4.5)) else {}
     # 仅在已有真实持仓时才展示残差篮子，避免页面只剩“残差代理”造成误导
@@ -1645,7 +1732,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     composition = {
         "sourceFusion": round(fused_conf, 2),
         "holdingsTimeliness": round(holdings_decay * 100.0, 2),
-        "coverage": round(min(100.0, (concentration_rate / max(stock_exposure * 100.0, 1e-6)) * 100.0), 2) if stock_exposure > 0 else 100.0,
+        "coverage": round(min(100.0, (concentration_rate / max(total_risk_exposure * 100.0, 1e-6)) * 100.0), 2) if total_risk_exposure > 0 else 100.0,
         "calibration": round(calibration_score, 2),
         "tickGuard": 70.0 if (em_data.get("tickGuard") or {}).get("rate_limited") else 95.0,
     }
@@ -1670,7 +1757,10 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "holdingsDecay": holdings_decay,
             "holdingsAgeDays": holdings_age_days,
             "stockExposure": round(stock_exposure, 4),
+            "cbExposure": round(cb_exposure, 4),
+            "totalRiskExposure": round(total_risk_exposure, 4),
             "top10Concentration": round(concentration_rate, 2),
+            "top10ConvertibleBondConcentration": round(cb_percent, 2),
             "residualBasketPercent": round(residual_percent, 2),
             "calibration": calib,
             "tickGuard": em_data.get("tickGuard"),
