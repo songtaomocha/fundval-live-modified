@@ -153,6 +153,16 @@ def collect_intraday_snapshots():
     skipped = 0
     fallback_used = 0
 
+    def _extract_eastmoney_raw_gsz(payload):
+        """Extract raw Eastmoney gsz from fused payload if present."""
+        try:
+            for src in (payload or {}).get("sources", []):
+                if src.get("name") == "eastmoney" and src.get("estimate") is not None:
+                    return float(src.get("estimate"))
+        except Exception:
+            return None
+        return None
+
     # 写入使用单独连接；每只基金单独提交，减少写锁持有时长
     write_conn = get_db_connection()
     write_cursor = write_conn.cursor()
@@ -161,17 +171,18 @@ def collect_intraday_snapshots():
         try:
             data = get_combined_valuation(code)
             if data and data.get("estimate"):
+                eastmoney_raw_gsz = _extract_eastmoney_raw_gsz(data)
                 write_cursor.execute("""
                     INSERT OR REPLACE INTO fund_intraday_snapshots
-                    (fund_code, date, time, estimate)
-                    VALUES (?, ?, ?, ?)
-                """, (code, date_str, time_str, float(data["estimate"])))
+                    (fund_code, date, time, estimate, eastmoney_raw_gsz)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (code, date_str, time_str, float(data["estimate"]), eastmoney_raw_gsz))
                 write_conn.commit()
                 collected += 1
             else:
                 # Fallback: carry forward latest known estimate for this fund (today first, then latest overall)
                 fallback_row = write_cursor.execute("""
-                    SELECT estimate FROM fund_intraday_snapshots
+                    SELECT estimate, eastmoney_raw_gsz FROM fund_intraday_snapshots
                     WHERE fund_code = ? AND date = ?
                     ORDER BY time DESC
                     LIMIT 1
@@ -179,7 +190,7 @@ def collect_intraday_snapshots():
 
                 if not fallback_row:
                     fallback_row = write_cursor.execute("""
-                        SELECT estimate FROM fund_intraday_snapshots
+                        SELECT estimate, eastmoney_raw_gsz FROM fund_intraday_snapshots
                         WHERE fund_code = ?
                         ORDER BY date DESC, time DESC
                         LIMIT 1
@@ -188,9 +199,15 @@ def collect_intraday_snapshots():
                 if fallback_row and fallback_row["estimate"] is not None:
                     write_cursor.execute("""
                         INSERT OR REPLACE INTO fund_intraday_snapshots
-                        (fund_code, date, time, estimate)
-                        VALUES (?, ?, ?, ?)
-                    """, (code, date_str, time_str, float(fallback_row["estimate"])))
+                        (fund_code, date, time, estimate, eastmoney_raw_gsz)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        code,
+                        date_str,
+                        time_str,
+                        float(fallback_row["estimate"]),
+                        float(fallback_row["eastmoney_raw_gsz"]) if fallback_row["eastmoney_raw_gsz"] is not None else None,
+                    ))
                     write_conn.commit()
                     collected += 1
                     fallback_used += 1
@@ -204,7 +221,7 @@ def collect_intraday_snapshots():
             # Exception fallback: try carry-forward to avoid broken chart continuity
             try:
                 fallback_row = write_cursor.execute("""
-                    SELECT estimate FROM fund_intraday_snapshots
+                    SELECT estimate, eastmoney_raw_gsz FROM fund_intraday_snapshots
                     WHERE fund_code = ?
                     ORDER BY date DESC, time DESC
                     LIMIT 1
@@ -212,9 +229,15 @@ def collect_intraday_snapshots():
                 if fallback_row and fallback_row["estimate"] is not None:
                     write_cursor.execute("""
                         INSERT OR REPLACE INTO fund_intraday_snapshots
-                        (fund_code, date, time, estimate)
-                        VALUES (?, ?, ?, ?)
-                    """, (code, date_str, time_str, float(fallback_row["estimate"])))
+                        (fund_code, date, time, estimate, eastmoney_raw_gsz)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        code,
+                        date_str,
+                        time_str,
+                        float(fallback_row["estimate"]),
+                        float(fallback_row["eastmoney_raw_gsz"]) if fallback_row["eastmoney_raw_gsz"] is not None else None,
+                    ))
                     write_conn.commit()
                     collected += 1
                     fallback_used += 1

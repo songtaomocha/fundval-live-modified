@@ -175,6 +175,7 @@ def init_db():
             date TEXT NOT NULL,
             time TEXT NOT NULL,
             estimate REAL NOT NULL,
+            eastmoney_raw_gsz REAL,
             PRIMARY KEY (fund_code, date, time)
         )
     """)
@@ -750,6 +751,15 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_eval_daily_date ON fund_model_eval_daily(trade_date)")
 
         cursor.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (11)")
+
+    # Migration 12: add eastmoney_raw_gsz to intraday snapshots
+    if current_version < 12:
+        logger.info("Running migration 12: add eastmoney_raw_gsz to fund_intraday_snapshots")
+        cursor.execute("PRAGMA table_info(fund_intraday_snapshots)")
+        intraday_columns = [row[1] for row in cursor.fetchall()]
+        if 'eastmoney_raw_gsz' not in intraday_columns:
+            cursor.execute("ALTER TABLE fund_intraday_snapshots ADD COLUMN eastmoney_raw_gsz REAL")
+        cursor.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (12)")
 
     # Profile-driven auto-correction tables (idempotent)
     cursor.execute("""
