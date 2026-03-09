@@ -1513,7 +1513,8 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     est_rate = float(em_data.get("estRate", 0.0))
     update_time = em_data.get("time", time.strftime("%H:%M:%S"))
     source = em_data.get("source")
-    method = em_data.get("method")
+    source_method = em_data.get("method")
+    method = "proportional_extension"
     confidence = em_data.get("confidence")
 
     # 1.5) Enrich with detailed info (time-budget aware)
@@ -1765,6 +1766,8 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "calibration": calib,
             "tickGuard": em_data.get("tickGuard"),
             "fusionSources": em_data.get("sources", []),
+            "sourceMethod": source_method,
+            "equityValuationMethod": "proportional_extension",
         },
         "indicators": {
             "returns": {
