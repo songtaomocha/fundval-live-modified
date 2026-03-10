@@ -787,7 +787,12 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
     fund_type = get_fund_type(code, fund_name)
     # 债券类基金盘中以实时估值为锚，避免历史校准把当日估值过度拉回
     if "债" in str(fund_type or ""):
-        calibrated_estimate = fused_estimate
+        em_anchor = None
+        try:
+            em_anchor = float((em_data or {}).get("estimate") or 0.0)
+        except Exception:
+            em_anchor = None
+        calibrated_estimate = em_anchor if (em_anchor and em_anchor > 0) else fused_estimate
         calib = {
             **calib,
             "scale": 1.0,
@@ -1757,6 +1762,9 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     # 以有效覆盖度决定融合强度，最多 65% 权重给持仓实时估算
     holdings_blend_weight = min(max(holdings_rate_den / 60.0, 0.0), 0.65)
     if holdings_est_rate is not None and holdings_rate_den >= 5.0:
+        # 债券类基金以实时主估值为主，避免持仓覆盖不全时被低估
+        if "债" in str(sector or ""):
+            holdings_blend_weight = min(holdings_blend_weight, 0.12)
         blended_est_rate = (1 - holdings_blend_weight) * float(est_rate) + holdings_blend_weight * float(holdings_est_rate)
         est_rate = round(float(blended_est_rate), 4)
         if nav and nav > 0:
