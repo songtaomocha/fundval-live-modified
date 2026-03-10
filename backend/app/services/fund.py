@@ -783,12 +783,23 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
     # 在线误差校准（bias/scale）
     calib_days = int(_get_global_setting("MODEL_CALIBRATION_LOOKBACK_DAYS", "20"))
     calib = _get_recent_calibration(code, lookback_days=max(5, calib_days))
-    calibrated_estimate = fused_estimate * float(calib.get("scale", 1.0)) + float(calib.get("bias", 0.0))
+
+    fund_type = get_fund_type(code, fund_name)
+    # 债券类基金盘中以实时估值为锚，避免历史校准把当日估值过度拉回
+    if "债" in str(fund_type or ""):
+        calibrated_estimate = fused_estimate
+        calib = {
+            **calib,
+            "scale": 1.0,
+            "bias": 0.0,
+            "calibration_mode": "disabled_for_bond_intraday",
+        }
+    else:
+        calibrated_estimate = fused_estimate * float(calib.get("scale", 1.0)) + float(calib.get("bias", 0.0))
 
     if nav_val <= 0:
         nav_val = calibrated_estimate
 
-    fund_type = get_fund_type(code, fund_name)
     correction = _compute_profile_correction(
         code=code,
         fund_type=fund_type,
