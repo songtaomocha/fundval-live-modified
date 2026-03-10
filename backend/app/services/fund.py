@@ -1725,7 +1725,33 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     
     holdings_with_residual = holdings + residual_proxy
 
-    # 6) 置信度评分（含组成项）
+    # 6) 用持仓实时涨跌（含可转债实时价格）对 estRate 做融合修正
+    holdings_rate_num = 0.0
+    holdings_rate_den = 0.0
+    for h in holdings_with_residual:
+        try:
+            pct = float(h.get("percent", 0.0))
+            chg = h.get("change")
+            if chg is None:
+                continue
+            chg = float(chg)
+            if pct <= 0:
+                continue
+            holdings_rate_num += pct * chg
+            holdings_rate_den += pct
+        except Exception:
+            continue
+
+    holdings_est_rate = (holdings_rate_num / 100.0) if holdings_rate_den > 0 else None
+    # 以有效覆盖度决定融合强度，最多 65% 权重给持仓实时估算
+    holdings_blend_weight = min(max(holdings_rate_den / 60.0, 0.0), 0.65)
+    if holdings_est_rate is not None and holdings_rate_den >= 5.0:
+        blended_est_rate = (1 - holdings_blend_weight) * float(est_rate) + holdings_blend_weight * float(holdings_est_rate)
+        est_rate = round(float(blended_est_rate), 4)
+        if nav and nav > 0:
+            estimate = round(float(nav) * (1 + est_rate / 100.0), 6)
+
+    # 7) 置信度评分（含组成项）
     fused_conf = float(confidence) if confidence is not None else 60.0
     calib = em_data.get("calibration") or {}
     calib_mae = calib.get("mae") if isinstance(calib, dict) else None
@@ -1768,6 +1794,10 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "fusionSources": em_data.get("sources", []),
             "sourceMethod": source_method,
             "equityValuationMethod": "proportional_extension",
+            "estRateFusion": "hybrid_realtime_holdings",
+            "holdingsRealtimeCoverage": round(holdings_rate_den, 2),
+            "holdingsRealtimeEstRate": round(float(holdings_est_rate), 4) if holdings_est_rate is not None else None,
+            "holdingsBlendWeight": round(float(holdings_blend_weight), 4),
         },
         "indicators": {
             "returns": {
