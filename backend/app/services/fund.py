@@ -785,22 +785,8 @@ def get_combined_valuation(code: str) -> Dict[str, Any]:
     calib = _get_recent_calibration(code, lookback_days=max(5, calib_days))
 
     fund_type = get_fund_type(code, fund_name)
-    # 债券类基金盘中以实时估值为锚，避免历史校准把当日估值过度拉回
-    if "债" in str(fund_type or ""):
-        em_anchor = None
-        try:
-            em_anchor = float((em_data or {}).get("estimate") or 0.0)
-        except Exception:
-            em_anchor = None
-        calibrated_estimate = em_anchor if (em_anchor and em_anchor > 0) else fused_estimate
-        calib = {
-            **calib,
-            "scale": 1.0,
-            "bias": 0.0,
-            "calibration_mode": "disabled_for_bond_intraday",
-        }
-    else:
-        calibrated_estimate = fused_estimate * float(calib.get("scale", 1.0)) + float(calib.get("bias", 0.0))
+    # 不再对债基单独锚定 Eastmoney；统一走融合估值 + 在线校准
+    calibrated_estimate = fused_estimate * float(calib.get("scale", 1.0)) + float(calib.get("bias", 0.0))
 
     if nav_val <= 0:
         nav_val = calibrated_estimate
@@ -1082,7 +1068,7 @@ def _fetch_stock_spots_sina(codes: List[str]) -> Dict[str, float]:
 
 
 def _fetch_stock_spots_tencent(codes: List[str]) -> Dict[str, float]:
-    """Fetch stock spot changes from Tencent quote API (A-share fallback)."""
+    """Fetch stock spot changes from Tencent quote API (A-share + HK fallback)."""
     if not codes:
         return {}
 
@@ -1095,6 +1081,10 @@ def _fetch_stock_spots_tencent(codes: List[str]) -> Dict[str, float]:
         if c_str.isdigit() and len(c_str) == 6:
             prefix = "sh" if c_str.startswith(('60', '68', '90', '11')) else "sz"
             q = f"{prefix}{c_str}"
+            formatted.append(q)
+            code_map[q] = c_str
+        elif c_str.isdigit() and len(c_str) == 5:
+            q = f"hk{c_str}"
             formatted.append(q)
             code_map[q] = c_str
 
@@ -1139,11 +1129,14 @@ def _fetch_stock_spots(codes: List[str]) -> Dict[str, float]:
 
     now = time.time()
     a_share_codes = [c for c in codes if str(c).strip().isdigit() and len(str(c).strip()) == 6]
-    other_codes = [c for c in codes if c not in a_share_codes]
+    hk_codes = [c for c in codes if str(c).strip().isdigit() and len(str(c).strip()) == 5]
+    other_codes = [c for c in codes if c not in a_share_codes and c not in hk_codes]
 
     results = {}
 
-    # HK/US still from Sina path
+    # HK 改走腾讯；US 等其它继续走 Sina
+    if hk_codes:
+        results.update(_fetch_stock_spots_tencent(hk_codes))
     if other_codes:
         results.update(_fetch_stock_spots_sina(other_codes))
 
@@ -1724,22 +1717,23 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     cb_exposure = min(max(cb_percent / 100.0, 0.0), 0.6)
     total_risk_exposure = min(max(stock_exposure + cb_exposure, 0.0), 0.98)
 
-    # 5) Top10 外残差篮子补全（按基金类型映射指数代理）
+    # 5) 股票按前十大等比例拓展到全部权益仓；可转债继续按实时口径单独计入
     residual_percent = max(stock_exposure * 100.0 - eq_percent, 0.0)
-    proxy_codes = _FUND_PROXY_MAP.get(sector) or _FUND_PROXY_MAP.get(major_category) or _FUND_PROXY_MAP.get("偏股类", ["510300"])
-    residual_spots = _fetch_stock_spots(proxy_codes) if (proxy_codes and not _budget_exceeded(4.5)) else {}
-    # 仅在已有真实持仓时才展示残差篮子，避免页面只剩“残差代理”造成误导
-    if residual_percent > 0.2 and proxy_codes and len(holdings) > 0:
-        per_bucket = residual_percent / len(proxy_codes)
-        for pcode in proxy_codes:
-            residual_proxy.append({
-                "name": f"残差篮子({pcode})",
-                "percent": round(per_bucket, 2),
-                "change": float(residual_spots.get(pcode, 0.0)),
-                "isResidual": True,
-            })
-    
-    holdings_with_residual = holdings + residual_proxy
+    scaled_holdings = []
+    equity_scale = 1.0
+    if eq_percent > 0.01 and stock_exposure > 0:
+        equity_scale = max((stock_exposure * 100.0) / eq_percent, 1.0)
+
+    for h in holdings:
+        item = dict(h)
+        if not item.get("isConvertibleBond"):
+            item["percent"] = round(float(item.get("percent", 0.0)) * equity_scale, 4)
+            item["isScaledEquity"] = equity_scale > 1.0001
+        else:
+            item["isScaledEquity"] = False
+        scaled_holdings.append(item)
+
+    holdings_with_residual = scaled_holdings
 
     # 6) 用持仓实时涨跌（含可转债实时价格）对 estRate 做融合修正
     holdings_rate_num = 0.0
@@ -1808,11 +1802,12 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "top10Concentration": round(concentration_rate, 2),
             "top10ConvertibleBondConcentration": round(cb_percent, 2),
             "residualBasketPercent": round(residual_percent, 2),
+            "equityScaleFactor": round(float(equity_scale), 4),
             "calibration": calib,
             "tickGuard": em_data.get("tickGuard"),
             "fusionSources": em_data.get("sources", []),
             "sourceMethod": source_method,
-            "equityValuationMethod": "proportional_extension",
+            "equityValuationMethod": "top10_proportional_extension",
             "estRateFusion": "hybrid_realtime_holdings",
             "holdingsRealtimeCoverage": round(holdings_rate_den, 2),
             "holdingsRealtimeEstRate": round(float(holdings_est_rate), 4) if holdings_est_rate is not None else None,
