@@ -3,6 +3,7 @@ import json
 import re
 import logging
 import math
+from io import StringIO
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -92,6 +93,130 @@ def _run_with_timeout(fn, timeout_seconds: float, *args, **kwargs):
         return None
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
+
+
+def _latest_report_year_for_holdings(now: datetime | None = None) -> str:
+    """Map current date to the latest disclosed quarterly report year.
+
+    规则（用户指定口径）：
+    - 1-3 月：取上一年四季报（year = 上一年）
+    - 4-7 月：取当年一季报（year = 当年）
+    - 8-10 月：取当年中报（year = 当年）
+    - 11-12 月：取当年三季报（year = 当年）
+
+    Eastmoney / AkShare 的持仓接口按 year 返回该年内各季度明细，因此这里返回“应直接查询的年份”。
+    """
+    now = now or datetime.now()
+    if now.month <= 3:
+        return str(now.year - 1)
+    return str(now.year)
+
+
+def _is_secondary_bond_fund(fund_type: str) -> bool:
+    ft = (fund_type or "").strip()
+    return any(k in ft for k in ["二级债", "混合二级债", "混合二级", "债券型-混合二级"])
+
+
+def _classify_holding_asset(code: str, name: str) -> str:
+    """Classify holding into stock / convertible_bond / bond."""
+    n = (name or "").strip()
+    c = re.sub(r"\D", "", str(code or "").strip())
+
+    if _is_convertible_bond_holding(c, n):
+        return "convertible_bond"
+
+    bond_keywords = ["国债", "金融债", "地方债", "同业存单", "中票", "短融", "超短融", "公司债", "企业债", "政金债"]
+    if any(k in n for k in bond_keywords):
+        return "bond"
+
+    if len(c) == 6 and c.startswith(("00", "30", "60", "68", "83", "87", "43", "92")):
+        return "stock"
+
+    if len(c) == 5 and c.isdigit():
+        return "stock"
+
+    # 名称无法明确判断时，默认保守按 bond 处理，避免把纯债误算成股票
+    return "bond"
+
+
+def _fetch_em_fund_archives_holdings(code: str, year: str, kind: str = "stock") -> pd.DataFrame:
+    """Direct Eastmoney fallback for holdings.
+
+    kind=stock -> 基金持仓(jjcc)
+    kind=bond  -> 债券持仓(zqcc)
+    用 HTTP 直连，避免容器内 AkShare HTTPS/解析链路超时导致空持仓。
+    """
+    type_map = {"stock": "jjcc", "bond": "zqcc"}
+    if kind not in type_map:
+        return pd.DataFrame()
+
+    params = {
+        "type": type_map[kind],
+        "code": code,
+        "year": year,
+        "rt": str(time.time()),
+    }
+    if kind == "stock":
+        params["topline"] = "10000"
+        params["month"] = ""
+
+    try:
+        resp = _get_http_session().get(
+            "http://fundf10.eastmoney.com/FundArchivesDatas.aspx",
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": f"http://fundf10.eastmoney.com/ccmx_{code}.html"},
+            timeout=4.2,
+        )
+        txt = resp.text or ""
+        start = txt.find("{")
+        end = txt.rfind("}")
+        if start < 0 or end <= start:
+            return pd.DataFrame()
+        payload = txt[start : end + 1]
+        payload = re.sub(r'([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', payload)
+        data_json = json.loads(payload)
+        content = data_json.get("content") or ""
+        if not content:
+            return pd.DataFrame()
+
+        tables = pd.read_html(StringIO(content))
+        labels = re.findall(r"(\d{4}年[1-4]季度(?:股票|债券)投资明细)", content)
+        big_df = pd.DataFrame()
+        for idx, temp_df in enumerate(tables):
+            temp_df = temp_df.copy()
+            quarter = labels[idx] if idx < len(labels) else f"{year}年未知季度"
+            if kind == "stock":
+                if "相关资讯" in temp_df.columns:
+                    del temp_df["相关资讯"]
+                temp_df.rename(columns={
+                    "占净值 比例": "占净值比例",
+                    "持股数（万股）": "持股数",
+                    "持仓市值（万元）": "持仓市值",
+                    "持股数 （万股）": "持股数",
+                    "持仓市值 （万元）": "持仓市值",
+                    "持仓市值（万元人民币）": "持仓市值",
+                    "持仓市值 （万元人民币）": "持仓市值",
+                }, inplace=True)
+                if "占净值比例" in temp_df.columns:
+                    temp_df["占净值比例"] = temp_df["占净值比例"].astype(str).str.split("%", expand=True).iloc[:, 0]
+                temp_df["季度"] = quarter.replace("股票投资明细", "")
+                keep_cols = [c for c in ["序号", "股票代码", "股票名称", "占净值比例", "持股数", "持仓市值", "季度"] if c in temp_df.columns]
+                temp_df = temp_df[keep_cols]
+            else:
+                temp_df.rename(columns={"持仓市值（万元）": "持仓市值"}, inplace=True)
+                if "占净值比例" in temp_df.columns:
+                    temp_df["占净值比例"] = temp_df["占净值比例"].astype(str).str.split("%", expand=True).iloc[:, 0]
+                temp_df["季度"] = quarter.replace("债券投资明细", "")
+                keep_cols = [c for c in ["序号", "债券代码", "债券名称", "占净值比例", "持仓市值", "季度"] if c in temp_df.columns]
+                temp_df = temp_df[keep_cols]
+            big_df = pd.concat([big_df, temp_df], ignore_index=True)
+
+        if not big_df.empty and "占净值比例" in big_df.columns:
+            big_df["占净值比例"] = pd.to_numeric(big_df["占净值比例"], errors="coerce").fillna(0.0)
+        return big_df
+    except Exception as e:
+        logger.warning(f"direct eastmoney holdings fetch failed for {code} year={year} kind={kind}: {e}")
+        return pd.DataFrame()
 
 
 def get_fund_type(code: str, name: str) -> str:
@@ -257,7 +382,7 @@ def _estimate_stock_exposure(fund_type: str, concentration_rate: float, holdings
 
     # 口径约束：混合一级债基视作“无股票仓位”；二级债基才重点核验权益暴露。
     is_primary_bond = any(k in ft for k in ["一级债", "混合一级债"]) or ft.startswith("债券型-长债")
-    is_secondary_bond = any(k in ft for k in ["二级债", "混合二级债"])
+    is_secondary_bond = any(k in ft for k in ["二级债", "混合二级债", "混合二级", "债券型-混合二级"])
     is_debt_fund = ("债" in ft and "可转债" not in ft)
 
     if is_primary_bond:
@@ -1571,6 +1696,8 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
     holdings_age_days = 180
     residual_percent = 0.0
     residual_proxy = []
+    sector = get_fund_type(code, name)
+    latest_report_year = _latest_report_year_for_holdings()
 
     # 先用30分钟缓存的“基础持仓结构”（名称/代码/比例/时效）；每次仅刷新涨跌幅
     base_cached = _HOLDINGS_BASE_CACHE.get(code)
@@ -1585,13 +1712,10 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
         if not base_holdings:
             holdings_df = None
             if not _budget_exceeded(7.0):
-                current_year = str(time.localtime().tm_year)
-                holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 3.0, symbol=code, date=current_year)
-                # 年初/当年未披露时，快速回退上一年（否则会出现持仓全空）
-                if (holdings_df is None or holdings_df.empty) and not _budget_exceeded(5.8):
-                    prev_year = str(time.localtime().tm_year - 1)
-                    # 上一年持仓接口有时较慢，适当放宽一次，命中后走30分钟缓存
-                    holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 4.2, symbol=code, date=prev_year)
+                # 直接按“最近一个已披露季报”所属年份取持仓，避免按 current_year 误查空值
+                holdings_df = _run_with_timeout(ak.fund_portfolio_hold_em, 4.2, symbol=code, date=latest_report_year)
+                if holdings_df is None or holdings_df.empty:
+                    holdings_df = _fetch_em_fund_archives_holdings(code, latest_report_year, kind="stock")
 
             if holdings_df is not None and not holdings_df.empty:
                 holdings_df = holdings_df.copy()
@@ -1620,11 +1744,10 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
 
                 latest_stock_df = _select_latest_quarter(holdings_df)
 
-                # 额外拉取债券持仓（含可转债），避免仅股票口径漏掉转债明细
-                bond_df = _run_with_timeout(ak.fund_portfolio_bond_hold_em, 3.5, symbol=code, date=current_year)
+                # 额外拉取债券持仓（含可转债），与股票持仓保持同一报告期口径
+                bond_df = _run_with_timeout(ak.fund_portfolio_bond_hold_em, 4.2, symbol=code, date=latest_report_year)
                 if bond_df is None or bond_df.empty:
-                    prev_year = str(time.localtime().tm_year - 1)
-                    bond_df = _run_with_timeout(ak.fund_portfolio_bond_hold_em, 4.2, symbol=code, date=prev_year)
+                    bond_df = _fetch_em_fund_archives_holdings(code, latest_report_year, kind="bond")
 
                 latest_bond_df = None
                 if bond_df is not None and not bond_df.empty:
@@ -1661,6 +1784,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
                 holdings_decay, holdings_age_days = _compute_holdings_timeliness_decay(latest_stock_df)
 
                 seen_codes = set()
+                all_holdings = []
                 for item in merged_rows:
                     sec_code = item["code"]
                     sec_name = item["name"]
@@ -1669,14 +1793,35 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
                     if dedup_key in seen_codes:
                         continue
                     seen_codes.add(dedup_key)
-                    base_holdings.append({
+                    asset_type = _classify_holding_asset(sec_code, sec_name)
+                    all_holdings.append({
                         "code": sec_code,
                         "name": sec_name,
                         "percent": percent,
-                        "isConvertibleBond": _is_convertible_bond_holding(sec_code, sec_name),
+                        "isConvertibleBond": asset_type == "convertible_bond",
+                        "assetType": asset_type,
                     })
 
-                base_holdings = base_holdings[:20]
+                base_holdings = all_holdings[:20]
+                # 二级债基自动纠正：即便股票占比小，也必须保留一部分股票样本，避免被债券/转债前20截断
+                if _is_secondary_bond_fund(sector) and not any(h.get("assetType") == "stock" for h in base_holdings):
+                    stock_candidates = [h for h in all_holdings if h.get("assetType") == "stock"]
+                    if stock_candidates:
+                        keep_non_stock = [h for h in base_holdings if h.get("assetType") != "stock"][:15]
+                        keep_stock = stock_candidates[:5]
+                        combined = keep_non_stock + keep_stock
+                        seen = set()
+                        fixed = []
+                        for h in combined:
+                            k = h.get("code") or h.get("name")
+                            if k in seen:
+                                continue
+                            seen.add(k)
+                            fixed.append(h)
+                        base_holdings = fixed
+                        logger.warning(
+                            f"secondary bond fund {code} stock holdings were truncated by top20 merge; preserved {len(keep_stock)} stock samples"
+                        )
                 _HOLDINGS_BASE_CACHE[code] = {
                     "items": base_holdings,
                     "concentration_rate": concentration_rate,
@@ -1701,17 +1846,76 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
             "percent": float(h.get("percent", 0.0)),
             "change": spot_map.get(h.get("code")),
             "isConvertibleBond": bool(h.get("isConvertibleBond", False)),
+            "assetType": h.get("assetType"),
         } for h in base_holdings]
     except Exception as e:
         logger.warning(f"holdings parse failed for {code}: {e}")
 
     # 4) Determine sector/type
-    sector = get_fund_type(code, name)
     major_category = get_fund_category(sector)
 
-    cb_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("isConvertibleBond"))
-    eq_percent = max(concentration_rate - cb_percent, 0.0)
-    eq_count = sum(1 for h in holdings if not h.get("isConvertibleBond"))
+    cb_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "convertible_bond")
+    stock_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "stock")
+    bond_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "bond")
+    eq_percent = stock_percent
+    eq_count = sum(1 for h in holdings if h.get("assetType") == "stock")
+
+    # 二级债基校验：股票持仓不应为空；若按最新披露口径仍为空，自动纠正并补抓一次上一报告年
+    if _is_secondary_bond_fund(sector) and eq_count == 0:
+        fallback_year = str(max(int(latest_report_year) - 1, 2000))
+        retry_df = _run_with_timeout(ak.fund_portfolio_hold_em, 4.2, symbol=code, date=fallback_year)
+        if retry_df is None or retry_df.empty:
+            retry_df = _fetch_em_fund_archives_holdings(code, fallback_year, kind="stock")
+        if retry_df is not None and not retry_df.empty:
+            retry_df = retry_df.copy()
+            if "占净值比例" in retry_df.columns:
+                retry_df["占净值比例"] = retry_df["占净值比例"].astype(str).str.replace("%", "", regex=False)
+                retry_df["占净值比例"] = pd.to_numeric(retry_df["占净值比例"], errors="coerce").fillna(0.0)
+            if "季度" in retry_df.columns:
+                q_series = retry_df["季度"].astype(str)
+                unique_quarters = [q for q in q_series.dropna().unique().tolist() if q and q != "nan"]
+                if unique_quarters:
+                    def _quarter_sort_key(q: str):
+                        m = re.search(r"(\d{4})年([1-4])季度", q)
+                        if not m:
+                            return (-1, -1)
+                        return (int(m.group(1)), int(m.group(2)))
+                    latest_quarter = max(unique_quarters, key=_quarter_sort_key)
+                    retry_df = retry_df[q_series == latest_quarter]
+
+            retry_stock_holdings = []
+            for _, row in retry_df.iterrows():
+                sec_code = str(row.get("股票代码") or row.get("证券代码") or row.get("资产代码") or "").strip()
+                sec_name = str(row.get("股票名称") or row.get("证券名称") or row.get("资产名称") or "").strip()
+                pct = float(row.get("占净值比例", 0.0))
+                if (not sec_code and not sec_name) or pct < 0.01:
+                    continue
+                if _classify_holding_asset(sec_code, sec_name) != "stock":
+                    continue
+                retry_stock_holdings.append({
+                    "name": sec_name,
+                    "percent": pct,
+                    "change": spot_map.get(sec_code),
+                    "isConvertibleBond": False,
+                    "assetType": "stock",
+                })
+
+            if retry_stock_holdings:
+                logger.warning(
+                    f"secondary bond fund {code} missing stock holdings in report year {latest_report_year}; auto-corrected from {fallback_year}"
+                )
+                existing_names = {str(h.get('name') or '').strip() for h in holdings}
+                for item in retry_stock_holdings:
+                    if item["name"] not in existing_names:
+                        holdings.append(item)
+                holdings.sort(key=lambda x: float(x.get("percent", 0.0)), reverse=True)
+                holdings = holdings[:20]
+                stock_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "stock")
+                bond_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "bond")
+                cb_percent = sum(float(h.get("percent", 0.0)) for h in holdings if h.get("assetType") == "convertible_bond")
+                eq_percent = stock_percent
+                eq_count = sum(1 for h in holdings if h.get("assetType") == "stock")
+                concentration_rate = stock_percent + bond_percent + cb_percent
 
     stock_exposure = _estimate_stock_exposure(sector, eq_percent, eq_count)
     cb_exposure = min(max(cb_percent / 100.0, 0.0), 0.6)
@@ -1726,7 +1930,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
 
     for h in holdings:
         item = dict(h)
-        if not item.get("isConvertibleBond"):
+        if item.get("assetType") == "stock":
             item["percent"] = round(float(item.get("percent", 0.0)) * equity_scale, 4)
             item["isScaledEquity"] = equity_scale > 1.0001
         else:
@@ -1796,6 +2000,7 @@ def get_fund_intraday(code: str) -> Dict[str, Any]:
         "modelMeta": {
             "holdingsDecay": holdings_decay,
             "holdingsAgeDays": holdings_age_days,
+            "holdingsReportYear": latest_report_year,
             "stockExposure": round(stock_exposure, 4),
             "cbExposure": round(cb_exposure, 4),
             "totalRiskExposure": round(total_risk_exposure, 4),
